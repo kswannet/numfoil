@@ -613,7 +613,7 @@ class FileAirfoil(Airfoil):
         return self.lower_surface.evaluate_at(u=x)
 
 
-class UIUCAirfoil(ProcessedFileAirfoil):#FileAirfoil):
+class UIUCAirfoil(FileAirfoil):#ProcessedFileAirfoil):#
     """Creates :py:class:`Airfoil` from a UIUC airfoil file."""
 
     def parse_file(self) -> np.ndarray:

@@ -33,6 +33,11 @@ class BSpline2D:
         """
         return si.splprep(self.points.T, s=0.0, k=self.degree)
 
+    # @cached_property
+    # def exact_interpolator(self):
+    #     pts = self.evaluate_at(np.linspace(0,1,num=200))
+    #     return si.pchip_interpolate(pts[:,0], pts[:,1], self.x, der=0, axis=0)
+
     def evaluate_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
         """Evaluate the spline point(s) at ``u``."""
         return np.array(si.splev(u, self.spline[0], der=0), dtype=np.float64).T
