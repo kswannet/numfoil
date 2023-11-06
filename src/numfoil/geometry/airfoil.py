@@ -445,7 +445,6 @@ class ProcessedPointsAirfoil(PointsAirfoil):
             array: Transformed airfoil coordinates
         """
         result = minimize(self._objective, np.array([0, 0, 0, 1, 1]))
-        translation_opt, rotation_angle_opt, scaling_opt = result.x[:2], result.x[2], result.x[3:]
         transformed_coords = self._transform_airfoil(self.unprocessed_points, result.x)
         return transformed_coords
 
