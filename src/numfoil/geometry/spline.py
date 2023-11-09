@@ -75,6 +75,8 @@ class BSpline2D:
         return 1 / curvature if curvature != 0 else np.inf
 
     @cached_property
-    def max_curvature(self, bounds=(0, 1)) -> float:
-        result = opt.minimize(lambda u: -self.curvature_at(u[0]), 0.5, bounds=[bounds])
+    def max_curvature(self, bounds=[(0, 1)]) -> float:
+        result = opt.minimize(lambda u: -self.curvature_at(u[0]), 0.5, bounds=bounds)
+        if not result.success:
+            print("Failed to find max curvature!")
         return result.x[0], self.curvature_at(result.x[0]) if result.success else float("nan")
