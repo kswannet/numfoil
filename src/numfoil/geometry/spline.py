@@ -5,6 +5,7 @@ from typing import Optional, Union
 
 import numpy as np
 import scipy.interpolate as si
+import scipy.optimize as opt
 
 from .geom2d import normalize_2d, rotate_2d_90ccw
 
@@ -42,12 +43,38 @@ class BSpline2D:
         """Evaluate the spline point(s) at ``u``."""
         return np.array(si.splev(u, self.spline[0], der=0), dtype=np.float64).T
 
+    def first_deriv_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
+        return np.array(si.splev(u, self.spline[0], der=1), dtype=np.float64).T
+
+    def second_deriv_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
+        return np.array(si.splev(u, self.spline[0], der=2), dtype=np.float64).T
+
     def tangent_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
         """Evaluate the spline tangent(s) at ``u``."""
-        return normalize_2d(
-            np.array(si.splev(u, self.spline[0], der=1), dtype=np.float64).T
-        )
+        # return normalize_2d(
+        #     np.array(si.splev(u, self.spline[0], der=1), dtype=np.float64).T
+        # )
+        return normalize_2d(self.first_deriv_at(u))
 
     def normal_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
         """Evaluate the spline normals(s) at ``u``."""
         return rotate_2d_90ccw(self.tangent_at(u))
+
+    def curvature_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
+        """Calculate the spline curvature at ``u``
+        k=|y"(x)| / (1+(y'(x))^2)^{3/2}
+        """
+        # a = np.abs(self.second_deriv_at(u)[1])
+        # b = (1+self.first_deriv_at(u)[1]**2)**(3/2)
+        dx, dy = self.first_deriv_at(u).T
+        ddx, ddy = self.second_deriv_at(u).T
+        return np.abs(ddy * dx - ddx * dy) / (dx**2 + dy**2)**1.5
+
+    def radius_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
+        curvature = self.curvature_at(u)
+        return 1 / curvature if curvature != 0 else np.inf
+
+    @cached_property
+    def max_curvature(self, bounds=(0, 1)) -> float:
+        result = opt.minimize(lambda u: -self.curvature_at(u[0]), 0.5, bounds=[bounds])
+        return result.x[0], self.curvature_at(result.x[0]) if result.success else float("nan")

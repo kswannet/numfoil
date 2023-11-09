@@ -332,10 +332,9 @@ class PointsAirfoil(Airfoil):
         return np.argmin(self.points[:,0])
 
     @cached_property
-    def le_sloc(self) -> np.ndarray:
-        """Returns the leading edge location on the surface spline."""
+    def le_u(self) -> np.ndarray:
+        """Returns the leading edge location (u) on the surface spline."""
         return minimize(lambda x: self.surface.evaluate_at(x)[0, 0], 0.5, bounds=[(0, 1)]).x[0]
-
 
     @cached_property
     def upper_surface(self) -> BSpline2D:
@@ -347,6 +346,10 @@ class PointsAirfoil(Airfoil):
         """Returns a spline of the lower airfoil surface."""
         return BSpline2D(self.points[self.le_idx :])
 
+    @cached_property
+    def le_radius(self) -> float:
+        return self.surface.radius_at(self.le_u)
+
     # TODO consider using geom2d views here
     @cached_property
     def mean_camber_line(self) -> BSpline2D:
@@ -357,7 +360,7 @@ class PointsAirfoil(Airfoil):
             between the top and bottom surfaces when measured normal
             to the chord-line.
         """
-        u = np.linspace(0, 1, num=2000)
+        u = np.linspace(0, 1, num=1000)
 
         upper_pts = self.upper_surface.evaluate_at(u)
         lower_pts = self.lower_surface.evaluate_at(u)
@@ -372,11 +375,9 @@ class PointsAirfoil(Airfoil):
         within a set tolerance.
         """
         u = np.linspace(0, 1, num=10)
-
         upper_pts = self.upper_surface.evaluate_at(u)
         lower_pts = self.lower_surface.evaluate_at(u)
         lower_pts[:, 1] *= -1  # Flipping the lower surface across the chord
-
         return not np.allclose(upper_pts, lower_pts, atol=1e-6)
 
     def remove_consecutive_duplicates(self, arr: np.ndarray) -> np.ndarray:
@@ -470,7 +471,7 @@ class ProcessedPointsAirfoil(PointsAirfoil):
         """objective function for airfoil processing"""
         transformed_coords = self._transform_airfoil(self.unprocessed_points, params)
         airfoil = PointsAirfoil(transformed_coords)
-        leading_edge = airfoil.surface.evaluate_at(airfoil.le_sloc)
+        leading_edge = airfoil.surface.evaluate_at(airfoil.le_u)
         trailing_edge = (transformed_coords[0] + transformed_coords[-1]) / 2
         error = np.linalg.norm(leading_edge - np.array([0, 0])) + np.linalg.norm(trailing_edge - np.array([1, 0]))
         return error
@@ -527,7 +528,7 @@ class FileAirfoil(Airfoil):
         return np.argmin(self.points[:,0])
 
     @cached_property
-    def le_sloc(self) -> np.ndarray:
+    def le_u(self) -> np.ndarray:
         """Returns the leading edge location on the surface spline."""
         return minimize(lambda x: self.surface.evaluate_at(x)[0, 0], 0.5, bounds=[(0, 1)]).x[0]
 
@@ -551,7 +552,7 @@ class FileAirfoil(Airfoil):
             between the top and bottom surfaces when measured normal
             to the chord-line.
         """
-        u = np.linspace(0, 1, num=1000)
+        u = np.linspace(0, 1, num=50)
 
         upper_pts = self.upper_surface.evaluate_at(u)
         lower_pts = self.lower_surface.evaluate_at(u)
