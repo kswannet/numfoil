@@ -420,6 +420,57 @@ class PointsAirfoil(Airfoil):
         """
         return self.lower_surface.evaluate_at(u=x)
 
+    def thickness_at(
+        self, u: Union[float, np.ndarray]) -> np.ndarray:
+        """find the thickness at location u.
+        Note that u is the parametric location on the splinem and the actual
+        x-location will thus differ slightly between lower and upper surface for
+        the same value of u.
+
+        Args:
+            u (Union[float, np.ndarray]): location on upper/lower surface spline
+
+        Returns:
+            Tuple[np.ndarray, np.ndarray]: thickness at location u
+        """
+        # np.atleast_1d(u)
+        return np.linalg.norm(self.upper_surface_at(u).T - self.lower_surface_at(u).T, axis=0)
+
+    @cached_property
+    def max_thickness(self) -> Tuple[np.ndarray, np.ndarray]:
+        result = minimize(lambda u: -self.thickness_at(u[0]), 0.5, bounds=[(0, 1)])
+        if not result.success:
+            raise Exception("Finding max thickness failed: " + result.message)
+        return result.x[0], -result.fun if result.success else float('nan')
+
+    @cached_property
+    def trailing_edge_thickness(self) -> float:
+        return np.linalg.norm(self.upper_surface_at(1)[0] - self.lower_surface_at(1)[0])
+
+    @cached_property
+    def trailing_edge_angle(self) -> float:
+        upper_tangent = self.upper_surface.tangent_at(1)[0]
+        lower_tangent = self.lower_surface.tangent_at(1)[0]
+        return np.arccos(np.dot(upper_tangent, lower_tangent))
+
+    def camber_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
+        return self.mean_camber_line.evaluate_at(u)[1]
+
+    @cached_property
+    def max_camber(self) -> Tuple[np.ndarray, np.ndarray]:
+        """finds maximum camber location and value
+
+        Raises:
+            Exception: optimization failed
+
+        Returns:
+            Tuple[np.ndarray, np.ndarray]: [u_max_camber, max_camber]
+        """
+        result = minimize(lambda u: -self.camber_at(u[0]), 0.5, bounds=[(0, 1)])
+        if not result.success:
+            raise Exception("Finding max camber failed: " + result.message)
+        return result.x[0], -result.fun if result.success else float('nan')
+
 
 class ProcessedPointsAirfoil(PointsAirfoil):
     """Provided points are stored in the `unprocessed_points' attr. Points are
@@ -485,7 +536,6 @@ class ProcessedFileAirfoil(ProcessedPointsAirfoil):
     def unprocessed_points(self) -> np.ndarray:
         """Returns airfoil ordinate points x, y as row-vectors."""
         return self.remove_consecutive_duplicates(self.parse_file())
-
 
 
 class FileAirfoil(Airfoil):
@@ -611,6 +661,57 @@ class FileAirfoil(Airfoil):
             x: Chord-line fraction (0 = LE, 1 = TE)
         """
         return self.lower_surface.evaluate_at(u=x)
+
+    def thickness_at(
+        self, u: Union[float, np.ndarray]) -> np.ndarray:
+        """find the thickness at location u.
+        Note that u is the parametric location on the splinem and the actual
+        x-location will thus differ slightly between lower and upper surface for
+        the same value of u.
+
+        Args:
+            u (Union[float, np.ndarray]): location on upper/lower surface spline
+
+        Returns:
+            Tuple[np.ndarray, np.ndarray]: thickness at location u
+        """
+        # np.atleast_1d(u)
+        return np.linalg.norm(self.upper_surface_at(u).T - self.lower_surface_at(u).T, axis=0)
+
+    @cached_property
+    def max_thickness(self) -> Tuple[np.ndarray, np.ndarray]:
+        result = minimize(lambda u: -self.thickness_at(u[0]), 0.5, bounds=[(0, 1)])
+        if not result.success:
+            raise Exception("Finding max thickness failed: " + result.message)
+        return result.x[0], -result.fun if result.success else float('nan')
+
+    @cached_property
+    def trailing_edge_thickness(self) -> float:
+        return np.linalg.norm(self.upper_surface_at(1)[0] - self.lower_surface_at(1)[0])
+
+    @cached_property
+    def trailing_edge_angle(self) -> float:
+        upper_tangent = self.upper_surface.tangent_at(1)[0]
+        lower_tangent = self.lower_surface.tangent_at(1)[0]
+        return np.arccos(np.dot(upper_tangent, lower_tangent))
+
+    def camber_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
+        return self.mean_camber_line.evaluate_at(u)[1]
+
+    @cached_property
+    def max_camber(self) -> Tuple[np.ndarray, np.ndarray]:
+        """finds maximum camber location and value
+
+        Raises:
+            Exception: optimization failed
+
+        Returns:
+            Tuple[np.ndarray, np.ndarray]: [u_max_camber, max_camber]
+        """
+        result = minimize(lambda u: -self.camber_at(u[0]), 0.5, bounds=[(0, 1)])
+        if not result.success:
+            raise Exception("Finding max camber failed: " + result.message)
+        return result.x[0], -result.fun if result.success else float('nan')
 
 
 class UIUCAirfoil(FileAirfoil):#ProcessedFileAirfoil):#
