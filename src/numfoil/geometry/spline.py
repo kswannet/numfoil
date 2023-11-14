@@ -71,12 +71,26 @@ class BSpline2D:
         return np.abs(ddy * dx - ddx * dy) / (dx**2 + dy**2)**1.5
 
     def radius_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
+        # TODO can this be vectorized?
+        """returns the radius of curvature on the spline at given location u
+
+        Args:
+            u (Union[float, np.ndarray]): locaiton on the spline u
+
+        Returns:
+            np.ndarray: curvature values
+        """
         curvature = self.curvature_at(u)
         return 1 / curvature if curvature != 0 else np.inf
 
     @cached_property
-    def max_curvature(self, bounds=[(0, 1)]) -> float:
-        result = opt.minimize(lambda u: -self.curvature_at(u[0]), 0.5, bounds=bounds)
+    def max_curvature(self) -> float:
+        """Finds maximum curvature of the spline
+        Returns:
+            Tuple[float, np.float]: [u, curvature]: max curvature location on
+            the spline (u) and the maximum curvature value
+        """
+        result = opt.minimize(lambda u: -self.curvature_at(u[0]), 0.5, bounds=[(0.01, 0.99)])
         if not result.success:
             print("Failed to find max curvature!")
-        return result.x[0], self.curvature_at(result.x[0]) if result.success else float("nan")
+        return result.x[0], -result.fun if result.success else float("nan")
