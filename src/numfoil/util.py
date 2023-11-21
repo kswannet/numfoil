@@ -20,6 +20,23 @@ import numpy as np
 from scipy.interpolate import interp1d
 
 
+class Container:
+    """
+    I don't like the dict() syntax.
+    """
+    def __init__(self, **kwargs):
+        "Set initial values"
+        for name, value in kwargs.items():
+            setattr(self, name, value)
+
+    def __setattr__(self, name, value):
+        "Redundant but whatever"
+        self.__dict__[name] = value
+
+    def __call__(self):
+        print(self.__dict__)
+
+
 def delta_cp_from_cp(
     x_values: Sequence[float], pressure_coefficients: Sequence[float], num=1000
 ):
@@ -53,3 +70,19 @@ def split_at_le(
         (x_values[: le_idx + 1], data[: le_idx + 1]),
         (x_values[le_idx + 1 :], data[le_idx + 1 :]),
     )
+
+
+def cosine_spacing(start, stop, num):
+    """Return cosine-spaced numbers over a specified interval.
+    Returns `num` cosine-spaced samples, calculated over the
+    interval [`start`, `stop`].
+
+    Args:
+        start (array_like): the starting value of the sequence.
+        stop (array_like): the end value of the sequence.
+        num (int): number of samples to generate. Must be non-negative.
+
+    Returns:
+        ndarray: `num` cosine-spaced samples in interval [`start`, `stop`]
+    """
+    return start + (stop - start) * 0.5 * (1 - np.cos(np.linspace(0, np.pi, num=num)))
