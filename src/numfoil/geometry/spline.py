@@ -18,9 +18,10 @@ class BSpline2D:
         degree: Degree of the spline. Defaults to 3 (cubic spline).
     """
 
-    def __init__(self, points: np.ndarray, degree: Optional[int] = 3):
+    def __init__(self, points: np.ndarray, degree: Optional[int] = 3, smoothing: Optional[int] = 0.0):
         self.points = points
         self.degree = degree
+        self.smoothing = smoothing
 
     @cached_property
     def spline(self):
@@ -32,7 +33,7 @@ class BSpline2D:
                      of the spline.
                 [1]: Parametric points, u, used to create the spline
         """
-        return si.splprep(self.points.T, s=0.0, k=self.degree)
+        return si.splprep(self.points.T, s=self.smoothing, k=self.degree)
 
     # @cached_property
     # def exact_interpolator(self):
@@ -66,6 +67,7 @@ class BSpline2D:
         """
         # a = np.abs(self.second_deriv_at(u)[1])
         # b = (1+self.first_deriv_at(u)[1]**2)**(3/2)
+        # return a/b if b != 0 else 0
         dx, dy = self.first_deriv_at(u).T
         ddx, ddy = self.second_deriv_at(u).T
         return np.abs(ddy * dx - ddx * dy) / (dx**2 + dy**2)**1.5
@@ -90,7 +92,12 @@ class BSpline2D:
             Tuple[float, np.float]: [u, curvature]: max curvature location on
             the spline (u) and the maximum curvature value
         """
-        result = opt.minimize(lambda u: -self.curvature_at(u[0]), 0.5, bounds=[(0.01, 0.99)])
+        result = opt.minimize(
+            lambda u: -self.curvature_at(u[0])**2,
+            0.5,
+            bounds=[(0., 1)],
+            method="SLSQP"
+            )
         if not result.success:
             print("Failed to find max curvature!")
-        return result.x[0], -result.fun if result.success else float("nan")
+        return result.x[0], np.sqrt(-result.fun) if result.success else float("nan")
