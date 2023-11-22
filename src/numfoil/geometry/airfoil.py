@@ -367,6 +367,12 @@ class PointsAirfoil(Airfoil):
     def trailing_edge(self) -> np.ndarray:
         """Returns the [x,y] coordinate of the trailing edge.
         Trailing edge is taken as the midpoint between surface spline ends."""
+        # minimize(
+        #     lambda u: -np.linalg.norm(
+        #         self.surface.evaluate_at(u[0]) - self.trailing_edge, axis=0),
+        #         0.5,
+        #         bounds=[(0, 1)]
+        #     ).x[0]
         return 0.5*(self.surface.evaluate_at(0) + self.surface.evaluate_at(1))
 
     @cached_property
@@ -441,8 +447,10 @@ class PointsAirfoil(Airfoil):
         # ! For some reason interpolator doesn't always go as far as 1, probably
         # ! due to rounding, so instead force the inteprolator beyond 1.
         # ! It's an ugly fix, but I don't have a better one atm.
-        u = cosine_spacing(0, 1.01, num=200)
-        x, y = self.upper_surface.evaluate_at(u).T
+        u = cosine_spacing(0, 1.001, num=200)
+        # x, y = self.upper_surface.evaluate_at(u).T
+        points = self.upper_surface.evaluate_at(u)  # because of e.g. ah81k144wfKlappe.dat
+        x, y = points[points[:, 0] == np.maximum.accumulate(points[:, 0])].T
         assert np.all(np.diff(x) > 0)
         return si.PchipInterpolator(x, y, extrapolate=False)
 
@@ -460,8 +468,10 @@ class PointsAirfoil(Airfoil):
         # ! For some reason interpolator doesn't always go as far as 1, probably
         # ! due to rounding, so instead force the inteprolator beyond 1.
         # ! It's an ugly fix, but I don't have a better one atm.
-        u = cosine_spacing(0, 1.01, num=200)
-        x, y = self.lower_surface.evaluate_at(u).T
+        u = cosine_spacing(0, 1.001, num=200)
+        # x, y = self.lower_surface.evaluate_at(u).T
+        points = self.lower_surface.evaluate_at(u)  # because of e.g. ah81k144wfKlappe.dat
+        x, y = points[points[:, 0] == np.maximum.accumulate(points[:, 0])].T
         assert np.all(np.diff(x) > 0)
         return si.PchipInterpolator(x, y, extrapolate=False)
 
@@ -800,7 +810,7 @@ class ProcessedFileAirfoil(ProcessedPointsAirfoil):
         return self.remove_consecutive_duplicates(self.parse_file())
 
 
-class UIUCAirfoil(ProcessedFileAirfoil):#FileAirfoil):#
+class UIUCAirfoil(FileAirfoil):#ProcessedFileAirfoil):#
     """Creates :py:class:`Airfoil` from a UIUC airfoil file."""
 
     def parse_file(self) -> np.ndarray:
