@@ -18,7 +18,7 @@ class BSpline2D:
         degree: Degree of the spline. Defaults to 3 (cubic spline).
     """
 
-    def __init__(self, points: np.ndarray, degree: Optional[int] = 3, smoothing: Optional[int] = 0.0):
+    def __init__(self, points: np.ndarray, degree: Optional[int] = 3, smoothing: Optional[float] = 0.0):
         self.points = points
         self.degree = degree
         self.smoothing = smoothing
@@ -70,7 +70,7 @@ class BSpline2D:
         # return a/b if b != 0 else 0
         dx, dy = self.first_deriv_at(u).T
         ddx, ddy = self.second_deriv_at(u).T
-        return np.abs(ddy * dx - ddx * dy) / (dx**2 + dy**2)**1.5
+        return ddy * dx - ddx * dy / (dx**2 + dy**2)**1.5
 
     def radius_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
         # TODO can this be vectorized?
