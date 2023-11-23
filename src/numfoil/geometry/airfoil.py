@@ -529,6 +529,7 @@ class PointsAirfoil(Airfoil):
                 'type': 'eq',
                 'fun': lambda u: (self.surface.evaluate_at(u[0])[0] - self.surface.evaluate_at(u[1])[0])**2,
             },
+            bounds=((0.05, 0.95), (0.05, 0.95)),
             method="SLSQP"
         )
         if not result.success:
@@ -549,9 +550,12 @@ class PointsAirfoil(Airfoil):
                 maximum thickness value t_max.
         """
         result = minimize(lambda x: -abs(self.thickness_at(x)**2), 0.5,)
-        if not result.success:
-            raise Exception("Finding max thickness failed: " + result.message)
-        return result.x[0], np.sqrt(-result.fun) if result.success else float('nan')
+        # if not result.success:
+        #     raise Exception("Finding max thickness failed: " + result.message)
+        if result.success:
+            return result.x[0], np.sqrt(-result.fun)
+        else:
+            return float('nan'), float('nan')
 
     # @cached_property
     @property
@@ -568,12 +572,51 @@ class PointsAirfoil(Airfoil):
         #     self.surface.evaluate_at(0) - self.surface.evaluate_at(1)
         #     )
 
+    @property
+    def trailing_edge_upper_vect(self):
+        return self.upper_surface.evaluate_at(1) - self.upper_surface.evaluate_at(0.95)
+
+    @property
+    def trailing_edge_lower_vect(self):
+        return self.lower_surface.evaluate_at(1) - self.lower_surface.evaluate_at(0.95)
+
     # @cached_property
     @property
     def trailing_edge_wedge_angle(self) -> float:
-        upper_tangent = self.upper_surface.tangent_at(1)[0]
-        lower_tangent = self.lower_surface.tangent_at(1)[0]
-        return np.arccos(np.dot(upper_tangent, lower_tangent))
+        # upper_tangent = self.upper_surface.tangent_at(1)[0]
+        # lower_tangent = self.lower_surface.tangent_at(1)[0]
+        # return np.arccos(np.dot(upper_tangent, lower_tangent))
+        angle_u = np.arctan2(
+            self.trailing_edge_upper_vect[1], self.trailing_edge_upper_vect[0]
+            )
+        angle_l = np.arctan2(
+            self.trailing_edge_lower_vect[1], self.trailing_edge_lower_vect[0]
+            )
+        return (angle_l-angle_u)*180/np.pi
+
+    @property
+    def trailing_edge_vect(self) -> float:
+        return self.mean_camber_line.evaluate_at(1) - self.mean_camber_line.evaluate_at(0.95)
+
+    @property
+    def trailing_edge_deflection_angle(self) -> float:
+        # camber_tangent = self.mean_camber_line.tangent_at(1)[0]
+        # return np.arctan2(camber_tangent[1], camber_tangent[0])
+        # * tangents at the end are not always correct, so instead take the
+        # * angle of the vector from +-0.95x/c to TE
+        return np.arctan2(self.trailing_edge_vect[1], self.trailing_edge_vect[0])*180/np.pi
+
+    @property
+    def leading_edge_vect(self) -> float:
+        return self.mean_camber_line.evaluate_at(0.02) - self.mean_camber_line.evaluate_at(0)
+
+    @property
+    def leading_edge_angle(self) -> float:
+        # camber_tangent = self.mean_camber_line.tangent_at(1)[0]
+        # return np.arctan2(camber_tangent[1], camber_tangent[0])
+        # * tangents at the end are not always correct, so instead take the
+        # * angle of the vector from +-0.95x/c to TE
+        return np.arctan2(self.leading_edge_vect[1], self.leading_edge_vect[0])*180/np.pi
 
     # @cached_property
     @property
@@ -599,6 +642,28 @@ class PointsAirfoil(Airfoil):
             raise Exception("Finding max camber failed: " + result.message)
         return result.x[0], -result.fun if result.success else float('nan')
 
+    # @cached_property
+    @property
+    def max_camber_simple(self) -> Tuple[np.ndarray, np.ndarray]:
+        """finds maximum camber location and value
+
+        Raises:
+            Exception: optimization failed
+
+        Returns:
+            Tuple[np.ndarray, np.ndarray]: [u_max_camber, max_camber]
+        """
+        result = minimize(    # the interpolator way
+            lambda x: -self.camber_at(x[0]),
+            0.5, bounds=[(0, 1)]
+        )
+        # if not result.success:
+        #     raise Exception("Finding max camber failed: " + result.message)
+        if result.success:
+            return result.x[0], -result.fun
+        else:
+            return float('nan'), float('nan')
+
     # ! WORK IN PROGRESS
     def set_trailing_edge_gap(self, gap, rf: int = 4):
         """ WORK IN PROGRESS
@@ -617,11 +682,11 @@ class PointsAirfoil(Airfoil):
         self.reset(surface=True)
         dgap = (self.trailing_edge_gap - gap)/2                 # upper and lower surface offset at trailing edge
 
-        if len(self.surface.spline[0][1].T) == len(self.surface.spline[1]):
+        if len(np.asarray(self.surface.spline[0][1]).T) == len(self.surface.spline[1]):
             ui = self.surface.spline[1]                             # locations of control points on the spline
             scaling_factors = abs(2*(ui-0.5))**rf                   # scaling factor for displacement effect
         else:
-            ui = self.surface.spline[0][1].T[:, 0]
+            ui = np.asarray(self.surface.spline[0][1]).T[:, 0]
             surface_points = self.surface.evaluate_at(ui)
             distances = np.linalg.norm(surface_points - self.trailing_edge, axis=1)
             scaling_factors = (1 - distances)**4
@@ -675,8 +740,8 @@ class PointsAirfoil(Airfoil):
         delattr(self, "lower_surface") if hasattr(self, "lower_surface") else self.lower_surface     # reset spline to new spline
         delattr(self, "upper_surface_at") if hasattr(self, "upper_surface_at") else self.upper_surface_at   # reset interpolators to new spline
         delattr(self, "lower_surface_at") if hasattr(self, "lower_surface_at") else self.lower_surface_at  # reset interpolators to new spline
-        delattr(self, "points") if hasattr(self, "points") else self.points      # reset spline to new spline
-        self.points                  # recalculate
+        # delattr(self, "points") if hasattr(self, "points") else self.points      # reset spline to new spline
+        # self.points                  # recalculate
         self.upper_surface                  # recalculate
         self.lower_surface                  # recalculate
         self.upper_surface_at               # recalculate
@@ -867,6 +932,7 @@ class AirfoilPlot:
             lower_surface_line=None,
             camber_line=None,
             LE_radius=None,
+            LE_angle=None,
             points=None,
             max_camber=None,
             max_thickness=None,
@@ -875,6 +941,8 @@ class AirfoilPlot:
             upper_curvature=[],
             lower_curvature=[],
             camber_curvature=[],
+            TE_wedge=[],
+            TE_angle=None,
         )
 
         self.colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
@@ -894,7 +962,7 @@ class AirfoilPlot:
         self.fig, self.ax = plt.subplots()
         self.ax.set_xlabel("Normalized Location Along Chordline (x/c)")
         self.ax.set_ylabel("Normalized Thickness (t/c)")
-        self.ax.set_title(self.airfoil.fullname)
+        self.ax.set_title(self.airfoil.fullname if hasattr(self.airfoil, "fullname") else "Airfoil")
         plt.axis("equal")
         self.upper_surface, self.lower_surface, self.camber_line
         self.ax.legend(loc="best")
@@ -1075,17 +1143,79 @@ class AirfoilPlot:
             self.elements.max_thickness.remove()
             self.elements.max_thickness = None
         else:
-            # u, t = self.airfoil.max_thickness_spline
-            # x, y = self.airfoil.surface.evaluate_at(u).T
-            x, t = self.airfoil.max_thickness
-            y = self.airfoil.lower_surface_at(x)
+            u, t = self.airfoil.max_thickness_spline
+            x, y = self.airfoil.surface.evaluate_at(u).T
+            # x, t = self.airfoil.max_thickness
+            # y = self.airfoil.lower_surface_at(x)
             assert np.allclose(y+t, self.airfoil.upper_surface_at(x))
             self.elements.max_thickness = plt.plot(
-                # x, y, '-*', label=f"Maximum Thickness {t:.2e}",
-                [x, x], [y, y+t], '-*', label=f"Maximum Thickness {t:.2e}",
+                x, y, '-*', label=f"Maximum Thickness {t:.2e}",
+                # [x, x], [y, y+t], '-*', label=f"Maximum Thickness {t:.2e}",
                 color=self.colors[6]
                 )[0]
-            # self.ax.add_line(self.elements.max_thickness)
+        self.ax.legend()
+
+    @property
+    def LE_angle(self):
+        if self.elements.LE_angle:
+            self.elements.LE_angle.remove()
+            self.elements.LE_angle = None
+        else:
+            vect = self.airfoil.leading_edge_vect
+            angle = self.airfoil.leading_edge_angle
+            a = np.array([0, 0])
+            b = (a + vect) * 20
+            x, y = np.column_stack([a, b])
+            self.elements.LE_angle = plt.plot(
+                x, y, label=f"Leading Edge Angle {angle:.2e}deg",
+                color=self.colors[7]
+                )[0]
+        self.ax.legend()
+
+    @property
+    def TE_angle(self):
+        if self.elements.TE_angle:
+            self.elements.TE_angle.remove()
+            self.elements.TE_angle = None
+        else:
+            vect = self.airfoil.trailing_edge_vect
+            angle = self.airfoil.trailing_edge_deflection_angle
+            a = np.array([1, 0])
+            b = a - vect * 10
+            x, y = np.column_stack([a, b])
+            self.elements.TE_angle = plt.plot(
+                x, y, label=f"Trailing Edge Angle {angle:.2e}deg",
+                color='k'
+                )[0]
+        self.ax.legend()
+
+    @property
+    def TE_wedge(self):
+        if self.elements.TE_wedge:
+            for line in self.elements.TE_wedge:
+                line.remove()
+            self.elements.TE_wedge = []
+        else:
+            vect_u = self.airfoil.trailing_edge_upper_vect
+            vect_l = self.airfoil.trailing_edge_lower_vect
+            angle = self.airfoil.trailing_edge_wedge_angle
+            a = np.array([1, 0])
+            b = a - vect_u * 6
+            x, y = np.column_stack([a, b])
+            self.elements.TE_wedge.append(
+                plt.plot(
+                    x, y, label=f"Trailing Edge Wedge Angle {angle:.2e}deg",
+                    color=self.colors[9]
+                )[0]
+            )
+            b = a - vect_l * 6
+            x, y = np.column_stack([a, b])
+            self.elements.TE_wedge.append(
+                plt.plot(
+                    x, y,
+                    color=self.colors[9]
+                )[0]
+            )
         self.ax.legend()
 
     @property
