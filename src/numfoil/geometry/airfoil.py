@@ -1309,6 +1309,15 @@ class AirfoilPlot:
     def reset(self):
         delattr(self.airfoil, "property_plotter")
 
+    def plot_all(self):
+        self.LE_radius
+        self.LE_angle
+        self.max_camber
+        self.max_thickness
+        self.max_curvature
+        self.TE_angle
+        self.TE_wedge
+
 
 
 # from numfoil.geometry.airfoilv2 import UIUCAirfoil
