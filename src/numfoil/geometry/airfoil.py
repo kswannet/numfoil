@@ -592,7 +592,7 @@ class PointsAirfoil(Airfoil):
         angle_l = np.arctan2(
             self.trailing_edge_lower_vect[1], self.trailing_edge_lower_vect[0]
             )
-        return (angle_l-angle_u)*180/np.pi
+        return (angle_l-angle_u)#*180/np.pi
 
     @property
     def trailing_edge_vect(self) -> float:
@@ -604,7 +604,7 @@ class PointsAirfoil(Airfoil):
         # return np.arctan2(camber_tangent[1], camber_tangent[0])
         # * tangents at the end are not always correct, so instead take the
         # * angle of the vector from +-0.95x/c to TE
-        return np.arctan2(self.trailing_edge_vect[1], self.trailing_edge_vect[0])*180/np.pi
+        return np.arctan2(self.trailing_edge_vect[1], self.trailing_edge_vect[0])#*180/np.pi
 
     @property
     def leading_edge_vect(self) -> float:
@@ -616,7 +616,7 @@ class PointsAirfoil(Airfoil):
         # return np.arctan2(camber_tangent[1], camber_tangent[0])
         # * tangents at the end are not always correct, so instead take the
         # * angle of the vector from +-0.95x/c to TE
-        return np.arctan2(self.leading_edge_vect[1], self.leading_edge_vect[0])*180/np.pi
+        return np.arctan2(self.leading_edge_vect[1], self.leading_edge_vect[0])#*180/np.pi
 
     # @cached_property
     @property
