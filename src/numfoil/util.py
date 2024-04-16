@@ -34,7 +34,7 @@ class Container:
         self.__dict__[name] = value
 
     def __call__(self):
-        print(self.__dict__)
+        print("\n".join(f"{k}: {v!r}," for k, v in self.__dict__.items()))
 
 
 def delta_cp_from_cp(
