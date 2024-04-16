@@ -35,11 +35,6 @@ class BSpline2D:
         """
         return si.splprep(self.points.T, s=self.smoothing, k=self.degree)
 
-    # @cached_property
-    # def exact_interpolator(self):
-    #     pts = self.evaluate_at(np.linspace(0,1,num=200))
-    #     return si.pchip_interpolate(pts[:,0], pts[:,1], self.x, der=0, axis=0)
-
     def evaluate_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
         """Evaluate the spline point(s) at ``u``."""
         return np.array(si.splev(u, self.spline[0], der=0), dtype=np.float64).T
@@ -85,12 +80,13 @@ class BSpline2D:
         curvature = self.curvature_at(u)
         return 1 / curvature if curvature != 0 else np.inf
 
-    @cached_property
+    # @cached_property
+    @property
     def max_curvature(self) -> float:
         """Finds maximum curvature of the spline
         Returns:
             Tuple[float, np.float]: [u, curvature]: max curvature location on
-            the spline (u) and the maximum curvature value
+        on the spline (u) and the maximum curvature value
         """
         result = opt.minimize(
             lambda u: -self.curvature_at(u[0])**2,

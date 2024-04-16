@@ -14,11 +14,10 @@
 
 """Contains all :py:class:`Airfoil` class definitions."""
 
-import re
+import re, os, copy
 from abc import ABCMeta, abstractmethod
 from functools import cached_property
 from typing import Tuple, Union
-import os
 
 import matplotlib
 import numpy as np
@@ -322,7 +321,7 @@ class PointsAirfoil(Airfoil):
         self.points = self.remove_consecutive_duplicates(points)
 
     @cached_property
-    def property_plotter(self):
+    def plotter(self):
         return AirfoilPlot(self)
 
     @cached_property
@@ -338,13 +337,8 @@ class PointsAirfoil(Airfoil):
         return BSpline2D(self.points, degree=3)
 
     # @cached_property
-    # def le_idx(self) -> np.ndarray:
-    #     """Returns the leading edge index within :py:attr:`points`."""
-    #     return np.argmin(self.points[:,0])
-
-    # @cached_property
     @property
-    def le_u(self) -> np.ndarray:
+    def u_leading_edge(self) -> np.ndarray:
         """Returns the leading edge location (u) on the surface spline as the
         point furthest away from the trailing edge."""
         return minimize(
@@ -359,37 +353,46 @@ class PointsAirfoil(Airfoil):
     def leading_edge_point(self) -> np.ndarray:
         """Returns the leading edge point coordinate as the
         point furthest away from the trailing edge."""
-        # assert self.surface.evaluate_at(self.le_u) == minimize(lambda x: self.surface.evaluate_at(x)[0, 0], 0.5, bounds=[(0, 1)]).x[0]
-        return self.surface.evaluate_at(self.le_u)
+        # assert self.surface.evaluate_at(self.u_leading_edge) == minimize(lambda x: self.surface.evaluate_at(x)[0, 0], 0.5, bounds=[(0, 1)]).x[0]
+        return self.surface.evaluate_at(self.u_leading_edge)
 
     # @cached_property
     @property
     def trailing_edge(self) -> np.ndarray:
-        """Returns the [x,y] coordinate of the trailing edge.
-        Trailing edge is taken as the midpoint between surface spline ends."""
-        # minimize(
-        #     lambda u: -np.linalg.norm(
-        #         self.surface.evaluate_at(u[0]) - self.trailing_edge, axis=0),
-        #         0.5,
-        #         bounds=[(0, 1)]
-        #     ).x[0]
-        return 0.5*(self.surface.evaluate_at(0) + self.surface.evaluate_at(1))
+            """Returns the [x,y] coordinate of the trailing edge.
+
+            Trailing edge is taken as the midpoint between surface spline ends.
+
+            Returns:
+                np.ndarray: The [x,y] coordinate of the trailing edge.
+            """
+            return 0.5*(self.surface.evaluate_at(0) + self.surface.evaluate_at(1))
 
     @cached_property
     def upper_surface(self) -> BSpline2D:
-        """Returns a spline of the upper airfoil surface."""
+        """
+        Returns a spline of the upper airfoil surface.
+
+        Returns:
+            BSpline2D: A spline representing the upper surface of the airfoil.
+        """
         return BSpline2D(
             self.surface.evaluate_at(
-                cosine_spacing(0, self.le_u, 200)
+                cosine_spacing(0, self.u_leading_edge, 100)
             )[::-1]
         )
 
     @cached_property
     def lower_surface(self) -> BSpline2D:
-        """Returns a spline of the lower airfoil surface."""
+        """
+        Returns a spline of the lower airfoil surface.
+
+        Returns:
+            BSpline2D: A spline representing the lower airfoil surface.
+        """
         return BSpline2D(
             self.surface.evaluate_at(
-                cosine_spacing(self.le_u, 1, 200)
+                cosine_spacing(self.u_leading_edge, 1, 100)
             )
         )
 
@@ -398,18 +401,20 @@ class PointsAirfoil(Airfoil):
     def mean_camber_line(self) -> BSpline2D:
         """Returns a spline of the mean-camber line.
 
-        Note:
-            The mean camber line is defined as the average distance
-            between the top and bottom surfaces when measured normal
-            to the chord-line.
+        The mean camber line is defined as the average distance
+        between the top and bottom surfaces measured normal to the
+        chord-line.
+
+        Returns:
+            BSpline2D: A spline representing the mean-camber line.
         """
         # u = np.linspace(0, 1, num=200)
-        u = cosine_spacing(0, 1, num=200)
+        u = cosine_spacing(0, 1, num=100)
         upper_pts = self.upper_surface.evaluate_at(u)
         lower_pts = self.lower_surface.evaluate_at(u)
         return BSpline2D(0.5 * (upper_pts + lower_pts))
 
-    @property
+    @cached_property
     def cambered(self) -> bool:
         """Returns if the current :py:class:`Airfoil` is cambered.
 
@@ -425,8 +430,15 @@ class PointsAirfoil(Airfoil):
 
     def remove_consecutive_duplicates(self, arr: np.ndarray) -> np.ndarray:
         """Removes consecutive duplicate coordinates.
-            > If the file contains consecutive duplicates, splprep will throw an
-              error when trying to create the surface spline.
+
+        If the file contains consecutive duplicates, splprep will throw an
+        error when trying to create the surface spline. This takes care of that.
+
+        Args:
+            arr (np.ndarray): The input array containing coordinates.
+
+        Returns:
+            np.ndarray: The array with consecutive duplicate coordinates removed.
         """
         diff = np.diff(arr, axis=0)                         # Compute the difference between consecutive rows
         idx = np.where(np.any(diff != 0, axis=1))[0] + 1    # Find the indices of the rows that are different from the preceding row
@@ -494,9 +506,11 @@ class PointsAirfoil(Airfoil):
         # return self.mean_camber_line.evaluate_at(u)[1]
         return self.camberline_at(x)
 
-    def thickness_at(
-        self, x: Union[float, np.ndarray]) -> np.ndarray:
-        """find the thickness at location x.
+    def thickness_at(self, x: Union[float, np.ndarray]) -> np.ndarray:
+        """Find the thickness at location x.
+
+        Uses upper and lower surface spline interpolators to find the thickness
+        at location x.
 
         Args:
             x (Union[float, np.ndarray]): chordwise location(s)
@@ -504,7 +518,6 @@ class PointsAirfoil(Airfoil):
         Returns:
             Tuple[np.ndarray, np.ndarray]: thickness at location x
         """
-        # np.atleast_1d(u)
         return self.upper_surface_at(x) - self.lower_surface_at(x)
 
     # @cached_property
@@ -558,9 +571,10 @@ class PointsAirfoil(Airfoil):
             return float('nan'), float('nan')
 
     # @cached_property
+    # TODO move these to parent class as its a general method
     @property
-    def le_radius(self) -> float:
-        return self.surface.radius_at(self.le_u)
+    def leading_edge_radius(self) -> float:
+        return self.surface.radius_at(self.u_leading_edge)
 
     # @cached_property
     @property
@@ -583,16 +597,25 @@ class PointsAirfoil(Airfoil):
     # @cached_property
     @property
     def trailing_edge_wedge_angle(self) -> float:
+        """
+        Calculates the wedge angle at the trailing edge of the airfoil.
+
+        !Tangents at the endpoint are not always correct, so instead take the
+        angle of the approximated vectors from +-0.95x/c to trailing edge.
+
+        Returns:
+            float: The wedge angle at the trailing edge in radians.
+        """
         # upper_tangent = self.upper_surface.tangent_at(1)[0]
         # lower_tangent = self.lower_surface.tangent_at(1)[0]
         # return np.arccos(np.dot(upper_tangent, lower_tangent))
-        angle_u = np.arctan2(
+        angle_upper = np.arctan2(
             self.trailing_edge_upper_vect[1], self.trailing_edge_upper_vect[0]
-            )
-        angle_l = np.arctan2(
+        )
+        angle_lower = np.arctan2(
             self.trailing_edge_lower_vect[1], self.trailing_edge_lower_vect[0]
-            )
-        return (angle_l-angle_u)#*180/np.pi
+        )
+        return (angle_lower - angle_upper)
 
     @property
     def trailing_edge_vect(self) -> float:
@@ -600,23 +623,43 @@ class PointsAirfoil(Airfoil):
 
     @property
     def trailing_edge_deflection_angle(self) -> float:
+        """
+        Calculate the (camber line) angle of the trailing edge of the airfoil.
+
+        !Tangents at the endpoint are not always correct, so instead take the
+        angle of the vector from +-0.95x/c to trailing edge.
+
+        Returns:
+            float: The angle of the leading edge in radians.
+        """
         # camber_tangent = self.mean_camber_line.tangent_at(1)[0]
         # return np.arctan2(camber_tangent[1], camber_tangent[0])
-        # * tangents at the end are not always correct, so instead take the
-        # * angle of the vector from +-0.95x/c to TE
-        return np.arctan2(self.trailing_edge_vect[1], self.trailing_edge_vect[0])#*180/np.pi
+        return np.arctan2(self.trailing_edge_vect[1], self.trailing_edge_vect[0])
 
     @property
     def leading_edge_vect(self) -> float:
+        """
+        Calculates the vector representing the leading edge angle of the airfoil.
+
+        Returns:
+            float: The vector representing the leading edge of the airfoil.
+        """
         return self.mean_camber_line.evaluate_at(0.02) - self.mean_camber_line.evaluate_at(0)
 
     @property
     def leading_edge_angle(self) -> float:
+        """
+        Calculate the (camber line) angle of the leading edge of the airfoil.
+
+        !Tangents at the endpoint are not always correct, so instead take the
+        angle of the vector from leading edge to +-0.02x/c
+
+        Returns:
+            float: The angle of the leading edge in radians.
+        """
         # camber_tangent = self.mean_camber_line.tangent_at(1)[0]
         # return np.arctan2(camber_tangent[1], camber_tangent[0])
-        # * tangents at the end are not always correct, so instead take the
-        # * angle of the vector from +-0.95x/c to TE
-        return np.arctan2(self.leading_edge_vect[1], self.leading_edge_vect[0])#*180/np.pi
+        return np.arctan2(self.leading_edge_vect[1], self.leading_edge_vect[0])
 
     # @cached_property
     @property
@@ -634,10 +677,6 @@ class PointsAirfoil(Airfoil):
             0.5,
             bounds=[(0, 1)]
         )
-        # result = minimize(    # the interpolator way
-        #     lambda x: -self.camber_at(x[0]),
-        #     0.5, bounds=[(0, 1)]
-        # )
         if not result.success:
             raise Exception("Finding max camber failed: " + result.message)
         return result.x[0], -result.fun if result.success else float('nan')
@@ -665,7 +704,7 @@ class PointsAirfoil(Airfoil):
             return float('nan'), float('nan')
 
     # ! WORK IN PROGRESS
-    def set_trailing_edge_gap(self, gap, rf: int = 4):
+    def set_trailing_edge_gap(self, gap, rf: int = 10):
         """ WORK IN PROGRESS
         Set trailing edge gap.
         Modifies the surface spline by moving the control points in the
@@ -678,68 +717,43 @@ class PointsAirfoil(Airfoil):
                 part of the airfoil affected by the change in trailing edge
                 thickness.
         """
-        # delattr(self, "surface")                                # reset to original surface by forcing recalculation
-        self.reset(surface=True)
-        dgap = (self.trailing_edge_gap - gap)/2                 # upper and lower surface offset at trailing edge
+        self.reset(surface=True)                                                # reset to original surface spline by forcing recalculation
+        dgap = (self.trailing_edge_gap - gap)/2                                 # upper and lower surface offset at trailing edge
 
+        # ! I forgot why I inlcuded this if statement, but it seems to work
         if len(np.asarray(self.surface.spline[0][1]).T) == len(self.surface.spline[1]):
-            ui = self.surface.spline[1]                             # locations of control points on the spline
-            scaling_factors = abs(2*(ui-0.5))**rf                   # scaling factor for displacement effect
+            ui = self.surface.spline[1]                                         # locations of control points on the spline
+            scaling_factors = abs(2*(ui-0.5))**rf                               # scaling factor for displacement effect
         else:
             ui = np.asarray(self.surface.spline[0][1]).T[:, 0]
             surface_points = self.surface.evaluate_at(ui)
             distances = np.linalg.norm(surface_points - self.trailing_edge, axis=1)
-            scaling_factors = (1 - distances)**4
+            scaling_factors = (1 - distances)**rf
 
-        normals = self.surface.normal_at(ui)                    # normals at the control points
-        self.surface.spline[0][1] += (                          # modify spline control points
+        normals = self.surface.normal_at(ui)                                    # normals at the control points
+        self.surface.spline[0][1] += (                                          # modify spline control points
             normals * dgap * scaling_factors[:, np.newaxis]
         ).T
-        self.reset(surface=False)
+        self.reset(surface=False)                                               # surface spline changed, so interpolators need recalculating, but keep modified spline
 
-        # delattr(self, "upper_surface")      # reset spline to new spline
-        # delattr(self, "lower_surface")      # reset spline to new spline
-        # delattr(self, "upper_surface_at")   # reset interpolators to new spline
-        # delattr(self, "lower_surface_at")   # reset interpolators to new spline
-        # delattr(self, "points")      # reset spline to new spline
-        # delattr(self, "trailing_edge_gap")  # reset interpolators to new spline
-        # self.points                  # recalculate
-        # self.upper_surface                  # recalculate
-        # self.lower_surface                  # recalculate
-        # self.upper_surface_at               # recalculate
-        # self.lower_surface_at               # recalculate
-        # self.trailing_edge_gap              # recalculate
-
-        # self.surface.spline = self._cache.surface_spline          # reset to original surface
-        # dgap = (np.linalg.norm(self.surface.evaluate_at(1) - self.surface.evaluate_at(0)) - gap)/2
-        # ui = self.surface.spline[1]                                 # spline locations of control points
-        # normals = self.surface.normal_at(ui)                        # normals at the control points
-        # surface_points = self.surface.evaluate_at(ui)
-        # distances = np.linalg.norm(surface_points - self.trailing_edge, axis=1)
-        # scaling_factors = (1 - distances)**4                      # alternate
-        # way to determine scaling factor based on distance from trailin edge
-
-        # if len(self.surface.spline[0][1].T) == len(self.surface.spline[1]):
-        #     scaling_factors = abs(2*(ui-0.5))**rf                   # scaling factor for displacement effect
-        # else:
-        #     surface_points = self.surface.evaluate_at(ui)
-        #     distances = np.linalg.norm(surface_points - self.trailing_edge, axis=1)
-        #     scaling_factors = (1 - distances)**4
 
     # ! WORK IN PROGRESS
     def reset(self, surface=True):
         """ WORK IN PROGRESS
+        Reset the airfoil spline and interpolators.
 
         Args:
-            surface (bool, optional): _description_. Defaults to True.
+            surface (bool, optional):  Flag indicating whether to reset the surface. Defaults to True.
         """
         if surface:
-            delattr(self, "surface")                                # reset to original surface by forcing recalculation
+            delattr(self, "surface") if hasattr(self, "surface") else self.surface                          # reset to original surface by forcing recalculation
             self.surface
-        delattr(self, "upper_surface") if hasattr(self, "upper_surface") else self.points     # reset spline to new spline
-        delattr(self, "lower_surface") if hasattr(self, "lower_surface") else self.lower_surface     # reset spline to new spline
-        delattr(self, "upper_surface_at") if hasattr(self, "upper_surface_at") else self.upper_surface_at   # reset interpolators to new spline
-        delattr(self, "lower_surface_at") if hasattr(self, "lower_surface_at") else self.lower_surface_at  # reset interpolators to new spline
+        delattr(self, "upper_surface") if hasattr(self, "upper_surface") else self.points                   # recalculate upper surface spline
+        delattr(self, "lower_surface") if hasattr(self, "lower_surface") else self.lower_surface            # recalculate lower surface spline
+        delattr(self, "mean_camber_line") if hasattr(self, "mean_camber_line") else self.mean_camber_line   # recalculate camberline interpolator
+        delattr(self, "upper_surface_at") if hasattr(self, "upper_surface_at") else self.upper_surface_at   # recalculate upper surface interpolator
+        delattr(self, "lower_surface_at") if hasattr(self, "lower_surface_at") else self.lower_surface_at   # recalculate lower surface interpolator
+        delattr(self, "camberline_at") if hasattr(self, "camberline_at") else self.camberline_at            # recalculate camber line interpolator
         # delattr(self, "points") if hasattr(self, "points") else self.points      # reset spline to new spline
         # self.points                  # recalculate
         self.upper_surface                  # recalculate
@@ -749,7 +763,7 @@ class PointsAirfoil(Airfoil):
 
 
     # ! WORK IN PROGRESS
-    def smooth_surface(self, s: float = 1e-6):
+    def smooth_surface(self, s: float = 1e-5):
         # delattr(self, "surface")                                # reset to original surface by forcing recalculation
         self.surface = BSpline2D(self.points, degree=3, smoothing=s)
         self.reset(surface=False)
@@ -772,10 +786,10 @@ class ProcessedPointsAirfoil(PointsAirfoil):
     """
     def __init__(self, points: np.ndarray):
         self.unprocessed_points = self.remove_consecutive_duplicates(points)
-        # self.set_trailing_edge_gap(0.001)
+        self.set_trailing_edge_gap(0.001, rf=25)
 
     @cached_property
-    def surface(self) -> BSpline2D:
+    def _surface(self) -> BSpline2D:
         """Return surface spline of the processed airfoil.
 
         Create a spline through the provided/original point coordinates.
@@ -796,31 +810,48 @@ class ProcessedPointsAirfoil(PointsAirfoil):
             8. apply translation, scaling, and  rotation to the surface spline
                control points.
         """
-        surface_spline = BSpline2D(self.unprocessed_points, degree=3)#, smoothing=1e-6)
+        surface_spline = BSpline2D(
+            self.unprocessed_points, degree=3, smoothing=1e-5
+        )
         self._cache.unprocessed_surface = surface_spline
         trailing_edge = 0.5*(surface_spline.evaluate_at(0) + surface_spline.evaluate_at(1))
-        LE_u = minimize(
+        u_leading_edge = minimize(
             lambda u: -np.linalg.norm(
                 surface_spline.evaluate_at(u[0]) - trailing_edge, axis=0
                 ),
             0.5,
             bounds=[(0, 1)]
         ).x[0]
-        leading_edge = surface_spline.evaluate_at(LE_u)
+        leading_edge = surface_spline.evaluate_at(u_leading_edge)
         chord_vector = trailing_edge - leading_edge
 
-        scaling = 1/np.linalg.norm(chord_vector)
-        translation = -leading_edge[:, np.newaxis]
-        angle = -np.arctan2(chord_vector[1], chord_vector[0])
-
+        scaling = 1/np.linalg.norm(chord_vector)                                # scaling factor based on chord length
+        translation = -leading_edge[:, np.newaxis]                              # translation vector to get leading edge in origin
+        angle = -np.arctan2(chord_vector[1], chord_vector[0])                   # rotation angle to get chordline on x-axis
         rotation_matrix = np.array([[np.cos(angle), -np.sin(angle)],
                                     [np.sin(angle), np.cos(angle)]])
-        surface_spline.spline[0][1] = (
+
+        surface_spline.spline[0][1] = (                                         # apply translation, scaling, and rotation to surface spline
             rotation_matrix @ (
                 (surface_spline.spline[0][1] + translation) * scaling
             )
         )
         return surface_spline
+
+    @cached_property
+    def surface(self) -> BSpline2D:
+        """
+        Returns the surface of the airfoil.
+
+        Serves as a wrapper for the processed surface spline.
+        This way the processed surface spline is only calculated once and
+        cached. Further modifications to the airfoil can be done without the
+        need to recalculate the surface spline.
+
+        Returns:
+            BSpline2D: The surface of the airfoil.
+        """
+        return copy.deepcopy(self._surface)
 
     @cached_property
     def points(self) -> np.ndarray:
@@ -833,8 +864,8 @@ class ProcessedPointsAirfoil(PointsAirfoil):
             coordinates (array): 199 airfoil coordinates in Selig format
         """
         u = np.append(
-            cosine_spacing(0, self.le_u, 100),      # Upper surface LE to TE
-            cosine_spacing(self.le_u, 1, 100)[1:])  # Lower surface TE to LE
+            cosine_spacing(0, self.u_leading_edge, 100),      # Upper surface LE to TE
+            cosine_spacing(self.u_leading_edge, 1, 100)[1:])  # Lower surface TE to LE
         return self.surface.evaluate_at(u)
 
 
@@ -931,8 +962,9 @@ class AirfoilPlot:
             upper_surface_line=None,
             lower_surface_line=None,
             camber_line=None,
-            LE_radius=None,
-            LE_angle=None,
+            leading_edge_point=None,
+            leading_edge_radius=None,
+            leading_edge_angle=None,
             points=None,
             max_camber=None,
             max_thickness=None,
@@ -941,8 +973,8 @@ class AirfoilPlot:
             upper_curvature=[],
             lower_curvature=[],
             camber_curvature=[],
-            TE_wedge=[],
-            TE_angle=None,
+            trailing_edge_wedgedge=[],
+            trailing_edge_angle=None,
         )
 
         self.colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
@@ -959,6 +991,13 @@ class AirfoilPlot:
         # plt.show()
 
     def draw(self):
+        """
+        Draw the airfoil geometry.
+
+        This method creates a plot of the airfoil geometry using matplotlib.
+        It sets the x and y labels, the title, and ensures that the plot is
+        displayed with equal aspect ratio. It also adds a legend to the plot.
+        """
         self.fig, self.ax = plt.subplots()
         self.ax.set_xlabel("Normalized Location Along Chordline (x/c)")
         self.ax.set_ylabel("Normalized Thickness (t/c)")
@@ -968,6 +1007,8 @@ class AirfoilPlot:
         self.ax.legend(loc="best")
         plt.show()
 
+# TODO: the coordinates should come from the airfoil, keeping the x-locations
+# TODO:   separate might be dangerous.
     # @cached_property
     @property
     def x_cos(self) -> np.ndarray:
@@ -1037,8 +1078,8 @@ class AirfoilPlot:
             self.elements.surface_line.remove()
             self.elements.surface_line = None
         else:
-            u1 = cosine_spacing(0, self.airfoil.le_u, self.n_points)
-            u2 = cosine_spacing(self.airfoil.le_u, 1, self.n_points)
+            u1 = cosine_spacing(0, self.airfoil.u_leading_edge, self.n_points)
+            u2 = cosine_spacing(self.airfoil.u_leading_edge, 1, self.n_points)
             u = np.append(u1[:-1], u2)
             x, y = self.airfoil.surface.evaluate_at(u).T
             self.elements.surface_line = self.ax.plot(
@@ -1063,32 +1104,46 @@ class AirfoilPlot:
         self.ax.legend()
 
     @property
-    def LE_radius(self):
+    def leading_edge_point(self):
+        if self.elements.leading_edge_point:
+            self.elements.leading_edge_point.remove()
+            self.elements.leading_edge_point = None
+        else:
+            x, y = self.airfoil.leading_edge_point
+            self.elements.leading_edge_point = plt.plot(
+                x, y, 'x', label="Airfoil leading edge point",
+                color='blue' #self.colors[4]
+                )[0]
+            # self.ax.add_line(self.elements.points)
+        self.ax.legend()
+
+    @property
+    def leading_edge_radius(self):
         """Leading edge radius plot consists of several elements:
             - the leading edge itself
             - the leading edge radius circle
             - leading edge circle centroid
             - leading edge radius itself connecting leading edge with centroid
         """
-        if self.elements.LE_radius:
+        if self.elements.leading_edge_radius:
             # self.elements.LE_point.remove()
-            self.elements.LE_radius_circle.remove()
-            # self.elements.LE_radius_c.remove()
-            self.elements.LE_radius.remove()
-            self.elements.LE_radius = None
+            self.elements.leading_edge_radius_circle.remove()
+            # self.elements.leading_edge_radius_c.remove()
+            self.elements.leading_edge_radius.remove()
+            self.elements.leading_edge_radius = None
         else:
-            le = self.airfoil.surface.evaluate_at(self.airfoil.le_u)
-            radius = self.airfoil.surface.radius_at(self.airfoil.le_u)
-            center = le + radius * self.airfoil.surface.normal_at(self.airfoil.le_u)[0]
-            self.elements.LE_radius_circle = plt.Circle(center, radius,
+            le = self.airfoil.surface.evaluate_at(self.airfoil.u_leading_edge)
+            radius = self.airfoil.surface.radius_at(self.airfoil.u_leading_edge)
+            center = le + radius * self.airfoil.surface.normal_at(self.airfoil.u_leading_edge)[0]
+            self.elements.leading_edge_radius_circle = plt.Circle(center, radius,
                 color="r", linestyle="--", linewidth=1.5, fill=False,
                 label=f"Leading Edge Radius {radius:.2e}",
                 )
-            self.ax.add_patch(self.elements.LE_radius_circle)
+            self.ax.add_patch(self.elements.leading_edge_radius_circle)
             xs, ys = np.column_stack((le, center))
-            self.elements.LE_radius = self.ax.plot(xs, ys, 'r--o')[0]#, label="Leading Edge Radius")[0]
-            # self.elements.LE_radius_c = self.ax.plot(center[0], center[1], 'go')[0]#, label="Leading Edge Radius")[0]
-            # self.elements.LE_radius = self.ax.plot(np.column_stack((le, center))[0], np.column_stack((le, center))[1], 'g--', label=f"Leading Edge Radius {radius:.2e}")[0]
+            self.elements.leading_edge_radius = self.ax.plot(xs, ys, 'r--o')[0]#, label="Leading Edge Radius")[0]
+            # self.elements.leading_edge_radius_c = self.ax.plot(center[0], center[1], 'go')[0]#, label="Leading Edge Radius")[0]
+            # self.elements.leading_edge_radius = self.ax.plot(np.column_stack((le, center))[0], np.column_stack((le, center))[1], 'g--', label=f"Leading Edge Radius {radius:.2e}")[0]
             # self.elements.LE_point = self.ax.plot(le[0], le[1], 'ro', label="Leading Edge")[0]
         self.ax.legend()
 
@@ -1156,45 +1211,45 @@ class AirfoilPlot:
         self.ax.legend()
 
     @property
-    def LE_angle(self):
-        if self.elements.LE_angle:
-            self.elements.LE_angle.remove()
-            self.elements.LE_angle = None
+    def leading_edge_angle(self):
+        if self.elements.leading_edge_angle:
+            self.elements.leading_edge_angle.remove()
+            self.elements.leading_edge_angle = None
         else:
             vect = self.airfoil.leading_edge_vect
             angle = self.airfoil.leading_edge_angle
             a = np.array([0, 0])
             b = (a + vect) * 20
             x, y = np.column_stack([a, b])
-            self.elements.LE_angle = plt.plot(
+            self.elements.leading_edge_angle = plt.plot(
                 x, y, label=f"Leading Edge Angle {angle:.2e}deg",
                 color=self.colors[7]
                 )[0]
         self.ax.legend()
 
     @property
-    def TE_angle(self):
-        if self.elements.TE_angle:
-            self.elements.TE_angle.remove()
-            self.elements.TE_angle = None
+    def trailing_edge_angle(self):
+        if self.elements.trailing_edge_angle:
+            self.elements.trailing_edge_angle.remove()
+            self.elements.trailing_edge_angle = None
         else:
             vect = self.airfoil.trailing_edge_vect
             angle = self.airfoil.trailing_edge_deflection_angle
             a = np.array([1, 0])
             b = a - vect * 10
             x, y = np.column_stack([a, b])
-            self.elements.TE_angle = plt.plot(
+            self.elements.trailing_edge_angle = plt.plot(
                 x, y, label=f"Trailing Edge Angle {angle:.2e}deg",
                 color='k'
                 )[0]
         self.ax.legend()
 
     @property
-    def TE_wedge(self):
-        if self.elements.TE_wedge:
-            for line in self.elements.TE_wedge:
+    def trailing_edge_wedgedge(self):
+        if self.elements.trailing_edge_wedgedge:
+            for line in self.elements.trailing_edge_wedgedge:
                 line.remove()
-            self.elements.TE_wedge = []
+            self.elements.trailing_edge_wedgedge = []
         else:
             vect_u = self.airfoil.trailing_edge_upper_vect
             vect_l = self.airfoil.trailing_edge_lower_vect
@@ -1202,7 +1257,7 @@ class AirfoilPlot:
             a = np.array([1, 0])
             b = a - vect_u * 6
             x, y = np.column_stack([a, b])
-            self.elements.TE_wedge.append(
+            self.elements.trailing_edge_wedgedge.append(
                 plt.plot(
                     x, y, label=f"Trailing Edge Wedge Angle {angle:.2e}deg",
                     color=self.colors[9]
@@ -1210,7 +1265,7 @@ class AirfoilPlot:
             )
             b = a - vect_l * 6
             x, y = np.column_stack([a, b])
-            self.elements.TE_wedge.append(
+            self.elements.trailing_edge_wedgedge.append(
                 plt.plot(
                     x, y,
                     color=self.colors[9]
@@ -1307,16 +1362,16 @@ class AirfoilPlot:
         self.ax.legend()
 
     def reset(self):
-        delattr(self.airfoil, "property_plotter")
+        delattr(self.airfoil, "plot")
 
     def plot_all(self):
-        self.LE_radius
-        self.LE_angle
+        self.leading_edge_radius
+        self.leading_edge_angle
         self.max_camber
         self.max_thickness
         self.max_curvature
-        self.TE_angle
-        self.TE_wedge
+        self.trailing_edge_angle
+        self.trailing_edge_wedgedge
 
 
 
