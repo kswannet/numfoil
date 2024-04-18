@@ -398,7 +398,7 @@ class PointsAirfoil(Airfoil):
 
     # TODO consider using geom2d views here
     @cached_property
-    def mean_camber_line(self) -> BSpline2D:
+    def camber_line(self) -> BSpline2D:
         """Returns a spline of the mean-camber line.
 
         The mean camber line is defined as the average distance
@@ -499,11 +499,11 @@ class PointsAirfoil(Airfoil):
             interpolator results: camber(line) y (ordinate) at x.
         """
         u = cosine_spacing(0, 1, num=200)
-        x, y = self.mean_camber_line.evaluate_at(u).T
+        x, y = self.camber_line.evaluate_at(u).T
         return si.PchipInterpolator(x, y, extrapolate=False)
 
     def camber_at(self, x: Union[float, np.ndarray]) -> np.ndarray:
-        # return self.mean_camber_line.evaluate_at(u)[1]
+        # return self.camber_line.evaluate_at(u)[1]
         return self.camberline_at(x)
 
     def thickness_at(self, x: Union[float, np.ndarray]) -> np.ndarray:
@@ -619,7 +619,7 @@ class PointsAirfoil(Airfoil):
 
     @property
     def trailing_edge_vect(self) -> float:
-        return self.mean_camber_line.evaluate_at(1) - self.mean_camber_line.evaluate_at(0.95)
+        return self.camber_line.evaluate_at(1) - self.camber_line.evaluate_at(0.95)
 
     @property
     def trailing_edge_deflection_angle(self) -> float:
@@ -632,7 +632,7 @@ class PointsAirfoil(Airfoil):
         Returns:
             float: The angle of the leading edge in radians.
         """
-        # camber_tangent = self.mean_camber_line.tangent_at(1)[0]
+        # camber_tangent = self.camber_line.tangent_at(1)[0]
         # return np.arctan2(camber_tangent[1], camber_tangent[0])
         return np.arctan2(self.trailing_edge_vect[1], self.trailing_edge_vect[0])
 
@@ -644,7 +644,7 @@ class PointsAirfoil(Airfoil):
         Returns:
             float: The vector representing the leading edge of the airfoil.
         """
-        return self.mean_camber_line.evaluate_at(0.02) - self.mean_camber_line.evaluate_at(0)
+        return self.camber_line.evaluate_at(0.02) - self.camber_line.evaluate_at(0)
 
     @property
     def leading_edge_angle(self) -> float:
@@ -657,7 +657,7 @@ class PointsAirfoil(Airfoil):
         Returns:
             float: The angle of the leading edge in radians.
         """
-        # camber_tangent = self.mean_camber_line.tangent_at(1)[0]
+        # camber_tangent = self.camber_line.tangent_at(1)[0]
         # return np.arctan2(camber_tangent[1], camber_tangent[0])
         return np.arctan2(self.leading_edge_vect[1], self.leading_edge_vect[0])
 
@@ -673,7 +673,7 @@ class PointsAirfoil(Airfoil):
             Tuple[np.ndarray, np.ndarray]: [u_max_camber, max_camber]
         """
         result = minimize(      # the spline way
-            lambda u: -self.mean_camber_line.evaluate_at(u[0])[1],
+            lambda u: -self.camber_line.evaluate_at(u[0])[1],
             0.5,
             bounds=[(0, 1)]
         )
@@ -750,7 +750,7 @@ class PointsAirfoil(Airfoil):
             self.surface
         delattr(self, "upper_surface") if hasattr(self, "upper_surface") else self.points                   # recalculate upper surface spline
         delattr(self, "lower_surface") if hasattr(self, "lower_surface") else self.lower_surface            # recalculate lower surface spline
-        delattr(self, "mean_camber_line") if hasattr(self, "mean_camber_line") else self.mean_camber_line   # recalculate camberline interpolator
+        delattr(self, "camber_line") if hasattr(self, "camber_line") else self.camber_line   # recalculate camberline interpolator
         delattr(self, "upper_surface_at") if hasattr(self, "upper_surface_at") else self.upper_surface_at   # recalculate upper surface interpolator
         delattr(self, "lower_surface_at") if hasattr(self, "lower_surface_at") else self.lower_surface_at   # recalculate lower surface interpolator
         delattr(self, "camberline_at") if hasattr(self, "camberline_at") else self.camberline_at            # recalculate camber line interpolator
@@ -1184,7 +1184,7 @@ class AirfoilPlot:
             self.elements.max_camber = None
         else:
             u, c = self.airfoil.max_camber
-            x, y = self.airfoil.mean_camber_line.evaluate_at(u)
+            x, y = self.airfoil.camber_line.evaluate_at(u)
             self.elements.max_camber = plt.plot(
                 [x, x], [0,y], '-*', label=f"Maximum Camber {c:.2e}",
                 color=self.colors[5]
@@ -1347,10 +1347,10 @@ class AirfoilPlot:
             self.elements.camber_curvature = []
         else:
             for u in np.linspace(0, 1, num=100):
-                point = self.airfoil.mean_camber_line.evaluate_at(u)
-                c = self.airfoil.mean_camber_line.curvature_at(u)
+                point = self.airfoil.camber_line.evaluate_at(u)
+                c = self.airfoil.camber_line.curvature_at(u)
                 radius = c/200#1/c
-                center = point + radius * self.airfoil.mean_camber_line.normal_at(u)[0]
+                center = point + radius * self.airfoil.camber_line.normal_at(u)[0]
                 xs, ys = np.column_stack((point, center))
                 self.elements.camber_curvature.append(
                     self.ax.plot(
