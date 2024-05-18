@@ -663,7 +663,7 @@ class PointsAirfoil(Airfoil):
 
     # @cached_property
     @property
-    def max_camber(self) -> Tuple[np.ndarray, np.ndarray]:
+    def max_camber_spline(self) -> Tuple[np.ndarray, np.ndarray]:
         """finds maximum camber location and value
 
         Raises:
@@ -683,7 +683,7 @@ class PointsAirfoil(Airfoil):
 
     # @cached_property
     @property
-    def max_camber_simple(self) -> Tuple[np.ndarray, np.ndarray]:
+    def max_camber(self) -> Tuple[np.ndarray, np.ndarray]:
         """finds maximum camber location and value
 
         Raises:
@@ -734,7 +734,7 @@ class PointsAirfoil(Airfoil):
         self.surface.spline[0][1] += (                                          # modify spline control points
             normals * dgap * scaling_factors[:, np.newaxis]
         ).T
-        self.reset(surface=False)                                               # surface spline changed, so interpolators need recalculating, but keep modified spline
+        # self.reset(surface=False)                                               # surface spline changed, so interpolators need recalculating, but keep modified spline
 
 
     # ! WORK IN PROGRESS
@@ -786,10 +786,11 @@ class ProcessedPointsAirfoil(PointsAirfoil):
     """
     def __init__(self, points: np.ndarray):
         self.unprocessed_points = self.remove_consecutive_duplicates(points)
-        self.set_trailing_edge_gap(0.001, rf=25)
+        self._points = self.unprocessed_points
+        # self.set_trailing_edge_gap(0.001, rf=25)
 
     @cached_property
-    def _surface(self) -> BSpline2D:
+    def surface(self) -> BSpline2D:
         """Return surface spline of the processed airfoil.
 
         Create a spline through the provided/original point coordinates.
@@ -811,9 +812,9 @@ class ProcessedPointsAirfoil(PointsAirfoil):
                control points.
         """
         surface_spline = BSpline2D(
-            self.unprocessed_points, degree=3, smoothing=1e-5
+            self._points, degree=3#, smoothing=1e-5
         )
-        self._cache.unprocessed_surface = surface_spline
+        # self._cache.unprocessed_surface = surface_spline
         trailing_edge = 0.5*(surface_spline.evaluate_at(0) + surface_spline.evaluate_at(1))
         u_leading_edge = minimize(
             lambda u: -np.linalg.norm(
@@ -838,20 +839,20 @@ class ProcessedPointsAirfoil(PointsAirfoil):
         )
         return surface_spline
 
-    @cached_property
-    def surface(self) -> BSpline2D:
-        """
-        Returns the surface of the airfoil.
+    # @cached_property
+    # def surface(self) -> BSpline2D:
+    #     """
+    #     Returns the surface of the airfoil.
 
-        Serves as a wrapper for the processed surface spline.
-        This way the processed surface spline is only calculated once and
-        cached. Further modifications to the airfoil can be done without the
-        need to recalculate the surface spline.
+    #     Serves as a wrapper for the processed surface spline.
+    #     This way the processed surface spline is only calculated once and
+    #     cached. Further modifications to the airfoil can be done without the
+    #     need to recalculate the surface spline.
 
-        Returns:
-            BSpline2D: The surface of the airfoil.
-        """
-        return copy.deepcopy(self._surface)
+    #     Returns:
+    #         BSpline2D: The surface of the airfoil.
+    #     """
+    #     return copy.deepcopy(self._surface)
 
     @cached_property
     def points(self) -> np.ndarray:
