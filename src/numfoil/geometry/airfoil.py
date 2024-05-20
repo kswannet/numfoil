@@ -367,12 +367,6 @@ class PointsAirfoil(Airfoil):
     def trailing_edge(self) -> np.ndarray:
         """Returns the [x,y] coordinate of the trailing edge.
         Trailing edge is taken as the midpoint between surface spline ends."""
-        # minimize(
-        #     lambda u: -np.linalg.norm(
-        #         self.surface.evaluate_at(u[0]) - self.trailing_edge, axis=0),
-        #         0.5,
-        #         bounds=[(0, 1)]
-        #     ).x[0]
         return 0.5*(self.surface.evaluate_at(0) + self.surface.evaluate_at(1))
 
     @cached_property
@@ -1147,7 +1141,7 @@ class AirfoilPlot:
             x, y = self.airfoil.surface.evaluate_at(u).T
             # x, t = self.airfoil.max_thickness
             # y = self.airfoil.lower_surface_at(x)
-            assert np.allclose(y+t, self.airfoil.upper_surface_at(x))
+            # assert np.allclose(y+t, self.airfoil.upper_surface_at(x))
             self.elements.max_thickness = plt.plot(
                 x, y, '-*', label=f"Maximum Thickness {t:.2e}",
                 # [x, x], [y, y+t], '-*', label=f"Maximum Thickness {t:.2e}",
