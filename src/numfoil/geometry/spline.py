@@ -8,6 +8,7 @@ import scipy.interpolate as si
 import scipy.optimize as opt
 
 from .geom2d import normalize_2d, rotate_2d_90ccw
+from ..util import cosine_spacing
 
 
 class BSpline2D:
@@ -101,3 +102,103 @@ class BSpline2D:
         if not result.success:
             print("Failed to find max curvature!")
         return result.x[0], np.sqrt(-result.fun) if result.success else float("nan")
+
+
+class CompositeBezierBspline(BSpline2D):
+    """Creates a composite B-spline representation of a set of points.
+    Bsplines are clamped in the first, last, and middle control points to
+    function as Bezier curves.
+
+    Args:
+        points: A set of 2D row-vectors
+        n_control_points: Number of control points per spline segment (upper and
+                          lower surfaces). Defaults to 6.
+        control_point_spaceing: Spacing between control points when location is
+                                fixed but not predefined. Defaults to None.
+    """
+
+    def __init__(
+            self, points: np.ndarray,
+            n_control_points: Optional[int] = 6,
+            control_point_spaceing: Union[str, np.ndarray] = None,
+            x_control_points: Optional[np.ndarray] = None,
+        ):
+        self.points = points
+        self._n_control_points = n_control_points
+        self._x_control_points = x_control_points
+
+    @cached_property
+    def x_control_points(self):
+        if self._x_control_points:
+            return self._x_control_points
+        elif self.control_point_spaceing:
+            match self.control_point_spaceing:
+                case "cosine":
+                    return cosine_spacing(0, 1, self.n_control_points)
+                case "linear":
+                    return np.linspace(0, 1, self.n_control_points)
+        else:
+            return np.linspace(0, 1, self.n_control_points)
+
+
+    @cached_property
+    def degree(self):
+        return self.n_control_points - 1
+
+    @cached_property
+    def n_control_points(self):
+        if self._n_control_points:
+            return self._n_control_points
+        else:
+            return self.degree + 1
+
+    @cached_property
+    def n_knots(self):
+        return self.n_control_points + self.degree + 1
+
+    @cached_property
+    def combined_control_points(self):
+        """Combine the upper and lower surface control points."""
+        return np.concatenate(
+                (
+                    self.control_points_upper,
+                    self.control_points_lower[1:]
+                )
+            )
+
+    @cached_property
+    def knot_value(self):
+        """Calculate the knot value for the combined spline.
+        This should be the leading edge location of the airfoil."""
+        distances = np.sqrt(np.sum(np.diff(self.combined_control_points, axis=0)**2, axis=1))  # Compute distances between control points# Compute distances between control points
+        parameters = np.concatenate(([0], np.cumsum(distances) / np.sum(distances)))           # Compute parameter values proportional to distances
+        return parameters[len(parameters)//2]                                                  # Compute knot value at knot point (middle of parameters)
+
+    @cached_property
+    def knots(self):
+        """Create a single, continuous knot vector for the combined spline.
+
+        Number of knot points should be number of control points + degree + 1
+        (n+p+1). The degree of the spline is the number of control points per
+        segment minus 1 (p-1). There must be at least one more distinct knot
+        value than the number of spline segments (in this case 2: upper and
+        lower surface).
+
+        To clamp the endpoints, the first and last knot point values must repeat
+        p+1 times, or in other words the first and last p+1 knot values must be
+        0 and 1, respectively. The knot point connecting the two curves should
+        repeat p times for C2 continuity.
+        """
+        return np.concatenate(([0]*(self.degree+1), [self.knot_value]*self.degree, [1]*(self.degree+1)))     # Create knot vector with knot value at knot point
+
+    @cached_property
+    def spline(self):
+        """1D spline representation of :py:attr:`points`.
+
+        Returns:
+            Scipy 1D spline representation:
+                [0]: Tuple of knots, the B-spline coefficients, degree
+                     of the spline.
+        """
+        return np.array([self.combined_knots, self.combined_control_points.T, self.degree])
+
