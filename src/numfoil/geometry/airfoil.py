@@ -360,14 +360,14 @@ class PointsAirfoil(Airfoil):
     # @cached_property
     @property
     def trailing_edge(self) -> np.ndarray:
-            """Returns the [x,y] coordinate of the trailing edge.
+        """Returns the [x,y] coordinate of the trailing edge.
 
-            Trailing edge is taken as the midpoint between surface spline ends.
+        Trailing edge is taken as the midpoint between surface spline ends.
 
-            Returns:
-                np.ndarray: The [x,y] coordinate of the trailing edge.
-            """
-            return 0.5*(self.surface.evaluate_at(0) + self.surface.evaluate_at(1))
+        Returns:
+            np.ndarray: The [x,y] coordinate of the trailing edge.
+        """
+        return 0.5*(self.surface.evaluate_at(0) + self.surface.evaluate_at(1))
 
     @cached_property
     def upper_surface(self) -> BSpline2D:
