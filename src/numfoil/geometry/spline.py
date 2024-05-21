@@ -1,11 +1,11 @@
 """Contains py:class:`BSpline` for splining 2D points."""
 
 from functools import cached_property
-from typing import Optional, Union
+from typing import Optional, Union, Tuple
 
 import numpy as np
 import scipy.interpolate as si
-import scipy.optimize as opt
+from scipy.optimize import minimize
 
 from .geom2d import normalize_2d, rotate_2d_90ccw
 
@@ -82,13 +82,13 @@ class BSpline2D:
 
     # @cached_property
     @property
-    def max_curvature(self) -> float:
+    def max_curvature(self) -> Tuple[float, float]:
         """Finds maximum curvature of the spline
         Returns:
             Tuple[float, np.float]: [u, curvature]: max curvature location on
         on the spline (u) and the maximum curvature value
         """
-        result = opt.minimize(
+        result = minimize(
             lambda u: -self.curvature_at(u[0])**2,
             0.5,
             bounds=[(0., 1)],
@@ -97,3 +97,53 @@ class BSpline2D:
         if not result.success:
             print("Failed to find max curvature!")
         return result.x[0], np.sqrt(-result.fun) if result.success else float("nan")
+
+    @property
+    def crest(self) -> Tuple[float, np.ndarray[float, float]]:
+        """Return lowest point of the airfoil.
+        Based on the PARSEC parameter.
+
+        Raises:
+            Exception: Finding crest failed.
+
+        Returns:
+            Tuple[float, np.ndarray]: [u, [x, y]]: crest location and coordinates.
+        """
+        result = minimize(lambda u: -self.evaluate_at(u[0])[1]**2,
+                0.5,
+                bounds=[(0, 1)]
+                )
+
+        if result.success:
+            return result.x[0], self.evaluate_at(result.x[0])
+        else:
+            raise Exception("Finding lower crest failed: " + result.message)
+
+    @property
+    def crest_curvature(self) -> float:
+        """Return the curvature at the crest."""
+        return self.curvature_at(self.crest[0])
+
+    def find_u(self, x: float = None, y: float = None) -> float:
+        """Find the parametric value ``u`` for a given point ``(x, y)``."""
+        if x is None and y is None:
+            print("At least one of x or y should be provided!")
+            return float("nan")
+
+        result = minimize(
+            lambda u: np.linalg.norm(
+                a := self.evaluate_at(u) - np.array([
+                    x if x is not None else a[0],
+                    y if y is not None else a[1]
+                    ])
+            ),
+            0.5,
+            bounds=[(0., 1)],
+            method="SLSQP"
+        )
+
+        if result.success:
+            return result.x[0]
+        else:
+            print("Failed to find u!")
+            return float("nan")

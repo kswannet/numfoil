@@ -17,11 +17,12 @@
 import re, os, copy
 from abc import ABCMeta, abstractmethod
 from functools import cached_property
-from typing import Tuple, Union
+from typing import Tuple, Union, Literal
 
 import matplotlib
 import numpy as np
 from matplotlib import pyplot as plt
+from matplotlib.patches import Arc
 
 import scipy.interpolate as si
 from scipy.optimize import minimize
@@ -520,6 +521,7 @@ class PointsAirfoil(Airfoil):
         """
         return self.upper_surface_at(x) - self.lower_surface_at(x)
 
+    # TODO this is probably too complex...
     # @cached_property
     @property
     def max_thickness_spline(self) -> Tuple[np.ndarray, np.ndarray]:
@@ -568,7 +570,86 @@ class PointsAirfoil(Airfoil):
         if result.success:
             return result.x[0], np.sqrt(-result.fun)
         else:
+            print("Finding max thickness failed: " + result.message)
             return float('nan'), float('nan')
+
+
+    # @cached_property
+    # @property
+    def upper_crest(self, output: Literal["u", "x"] = "u") -> Tuple[float, float]:
+        """Return highest point of the airfoil.
+        Based on the PARSEC parameter.
+        'Output' can be either "u" or "x" for the location of the crest and
+        determines if the output should be the u-location on the spline or the
+        x-ordinate.
+
+        Args:
+            output (str, optional): defines whether output should be parametric
+            location on the spline of the x ordinate. Defaults to "u".
+
+        Raises:
+            Exception: Finding upper crest failed.
+
+        Returns:
+            Tuple[float, float]: [u, y_max]: upper crest location and y value.
+        """
+        if output == "u":
+            result = minimize(
+                lambda u: -self.upper_surface.evaluate_at(u[0])[1]**2,
+                0.5,
+                bounds=[(0, 1)]
+                )
+        elif output == "x":
+            result = minimize(lambda x: -self.upper_surface_at(x[0])**2,
+                0.5,
+                bounds=[(0, 1)]
+                )
+
+        if result.success:
+            return result.x[0], np.sqrt(-result.fun)
+        else:
+            raise Exception("Finding upper crest failed: " + result.message)
+
+    # @cached_property
+    # @property
+    def lower_crest(self, output: Literal["u", "x"] = "u") -> Tuple[float, float]:
+        """Return lowest point of the airfoil.
+        Based on the PARSEC parameter.
+        'Output' can be either "u" or "x" for the location of the crest and
+        determines if the output should be the u-location on the spline or the
+        x-ordinate.
+
+        Args:
+            output (str, optional): defines whether output should be parametric
+            location on the spline of the x ordinate. Defaults to "u".
+
+        Raises:
+            Exception: Finding lower crest failed.
+
+        Returns:
+            Tuple[float, float]: [u, y_max]: lower crest location and y value.
+        """
+        if output == "u":
+            result = minimize(
+                lambda u: -self.lower_surface.evaluate_at(u[0])[1]**2,
+                0.5,
+                bounds=[(0, 1)]
+            )
+        elif output == "x":
+            result = minimize(
+                lambda x: -self.lower_surface_at(x[0])**2,
+                0.5,
+                bounds=[(0, 1)]
+            )
+        if result.success:
+            return result.x[0], -np.sqrt(-result.fun)
+        else:
+            raise Exception("Finding lower crest failed: " + result.message)
+
+        # @cached_property
+    @property
+    def upper_crest_curvature(self) -> Tuple[np.ndarray, np.ndarray]:
+        return self.upper_surface.curvature_at(self.upper_crest[0])
 
     # @cached_property
     # TODO move these to parent class as its a general method
@@ -586,12 +667,21 @@ class PointsAirfoil(Airfoil):
         #     self.surface.evaluate_at(0) - self.surface.evaluate_at(1)
         #     )
 
+    # TODO see if there is a way to properly use the gradient instead of approximation
     @property
     def trailing_edge_upper_vect(self):
+        """This should ideally be the gradient at the trailing edge, but this
+        often yields incorrect results, so instead take the vector from the
+        point at 95% of the surface to the trailing edge as an approximation.
+        """
         return self.upper_surface.evaluate_at(1) - self.upper_surface.evaluate_at(0.95)
 
     @property
     def trailing_edge_lower_vect(self):
+        """This should ideally be the gradient at the trailing edge, but this
+        often yields incorrect results, so instead take the vector from the
+        point at 95% of the surface to the trailing edge as an approximation.
+        """
         return self.lower_surface.evaluate_at(1) - self.lower_surface.evaluate_at(0.95)
 
     # @cached_property
@@ -970,6 +1060,10 @@ class AirfoilPlot:
             max_camber=None,
             max_thickness=None,
             max_curvature=None,
+            upper_crest=None,
+            lower_crest=None,
+            upper_crest_curvature=None,
+            lower_crest_curvature=None,
             surface_curvature=[],
             upper_curvature=[],
             lower_curvature=[],
@@ -1203,12 +1297,83 @@ class AirfoilPlot:
             x, y = self.airfoil.surface.evaluate_at(u).T
             # x, t = self.airfoil.max_thickness
             # y = self.airfoil.lower_surface_at(x)
-            assert np.allclose(y+t, self.airfoil.upper_surface_at(x))
             self.elements.max_thickness = plt.plot(
                 x, y, '-*', label=f"Maximum Thickness {t:.2e}",
                 # [x, x], [y, y+t], '-*', label=f"Maximum Thickness {t:.2e}",
                 color=self.colors[6]
                 )[0]
+        self.ax.legend()
+
+    @property
+    def upper_crest(self):
+        if self.elements.upper_crest:
+            self.elements.upper_crest.remove()
+            self.elements.upper_crest = None
+        else:
+            # x, y = self.airfoil.upper_crest(output="x")
+            _, [x, y] = self.airfoil.upper_surface.crest
+            self.elements.upper_crest = plt.plot(
+                [x, x], [0,y], '-_', label=f"Upper Crest {y:.2e}",
+                color="k"
+                )[0]
+        self.ax.legend()
+
+    @property
+    def lower_crest(self):
+        if self.elements.lower_crest:
+            self.elements.lower_crest.remove()
+            self.elements.lower_crest = None
+        else:
+            # x, y = self.airfoil.lower_crest(output="x")
+            _, [x, y] = self.airfoil.lower_surface.crest
+            self.elements.lower_crest = plt.plot(
+                [x, x], [0,y], '-_', label=f"Lower Crest {y:.2e}",
+                color="k"
+                )[0]
+        self.ax.legend()
+
+    @property
+    def upper_crest_curvature(self):
+        """Upper crest curvature plot consists of several elements:
+            - the upper crest itself
+            - the upper crest curvature circle
+            - upper crest circle centroid
+            - upper crest curvature itself connecting upper crest with centroid
+        """
+        if self.elements.upper_crest_curvature:
+            self.elements.upper_crest_curvature.remove()
+            self.elements.upper_crest_curvature = None
+        else:
+            u, xy = self.airfoil.upper_surface.crest
+            curvature = abs(self.airfoil.upper_surface.curvature_at(u))
+            radius = 1/curvature
+            self.elements.upper_crest_curvature = Arc(xy - [0, radius], 2*radius, 2*radius, angle=90, theta1=-15, theta2=15,
+                color="r", linestyle="--", linewidth=1.5,
+                label=f"Upper Crest Curvature {curvature:.2e}",
+                )
+            self.ax.add_patch(self.elements.upper_crest_curvature)
+        self.ax.legend()
+
+    @property
+    def lower_crest_curvature(self):
+        """lower crest curvature plot consists of several elements:
+            - the lower crest itself
+            - the lower crest curvature circle
+            - lower crest circle centroid
+            - lower crest curvature itself connecting lower crest with centroid
+        """
+        if self.elements.lower_crest_curvature:
+            self.elements.lower_crest_curvature.remove()
+            self.elements.lower_crest_curvature = None
+        else:
+            u, xy = self.airfoil.lower_surface.crest
+            curvature = abs(self.airfoil.lower_surface.curvature_at(u))
+            radius = 1/curvature
+            self.elements.lower_crest_curvature = Arc(xy + [0, radius], 2*radius, 2*radius, angle=-90, theta1=-15, theta2=15,
+                color="r", linestyle="--", linewidth=1.5,
+                label=f"Lower Crest Curvature {curvature:.2e}",
+                )
+            self.ax.add_patch(self.elements.lower_crest_curvature)
         self.ax.legend()
 
     @property
