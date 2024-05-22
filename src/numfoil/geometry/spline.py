@@ -236,7 +236,7 @@ class CompositeBezierBspline(BSpline2D):
 
         Number of knot points should be number of control points + degree + 1
         (n+p+1). The degree of the spline is the number of control points per
-        segment minus 1 (p-1). There must be at least one more distinct knot
+        segment minus 1: p =(n-1). There must be at least one more distinct knot
         value than the number of spline segments (in this case 2: upper and
         lower surface).
 
