@@ -131,13 +131,24 @@ class BSpline2D:
             print("At least one of x or y should be provided!")
             return float("nan")
 
+        # result = minimize(
+        #     lambda u: np.linalg.norm(
+        #         (a := self.evaluate_at(u)) - np.array([
+        #             x if x is not None else a[0],
+        #             y if y is not None else a[1]
+        #             ])
+        #     ),
+        #     0.5,
+        #     bounds=[(0., 1)],
+        #     method="SLSQP"
+        # )
         result = minimize(
-            lambda u: np.linalg.norm(
-                a := self.evaluate_at(u) - np.array([
+            lambda u: (
+                lambda a: np.linalg.norm(a - np.array([
                     x if x is not None else a[0],
                     y if y is not None else a[1]
-                    ])
-            ),
+                ]))
+            )(self.evaluate_at(u)),
             0.5,
             bounds=[(0., 1)],
             method="SLSQP"
