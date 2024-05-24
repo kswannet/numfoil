@@ -21,8 +21,13 @@ class BSpline2D:
 
     def __init__(self, points: np.ndarray, degree: Optional[int] = 3, smoothing: Optional[float] = 0.0):
         self.points = points
-        self.degree = degree
+        self._degree = degree
         self.smoothing = smoothing
+
+    @property
+    def degree(self) -> int:
+        return self._degree
+
 
     @cached_property
     def spline(self):
@@ -32,24 +37,24 @@ class BSpline2D:
             Scipy 1D spline representation:
                 [0]: Tuple of knots, the B-spline coefficients, degree
                      of the spline.
-                [1]: Parametric points, u, used to create the spline
+                #//[1]: Parametric points, u, used to create the spline
         """
-        return si.splprep(self.points.T, s=self.smoothing, k=self.degree)
+        return si.splprep(self.points.T, s=self.smoothing, k=self.degree)[0]
 
     def evaluate_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
         """Evaluate the spline point(s) at ``u``."""
-        return np.array(si.splev(u, self.spline[0], der=0), dtype=np.float64).T
+        return np.array(si.splev(u, self.spline, der=0), dtype=np.float64).T
 
     def first_deriv_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
-        return np.array(si.splev(u, self.spline[0], der=1), dtype=np.float64).T
+        return np.array(si.splev(u, self.spline, der=1), dtype=np.float64).T
 
     def second_deriv_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
-        return np.array(si.splev(u, self.spline[0], der=2), dtype=np.float64).T
+        return np.array(si.splev(u, self.spline, der=2), dtype=np.float64).T
 
     def tangent_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
         """Evaluate the spline tangent(s) at ``u``."""
         # return normalize_2d(
-        #     np.array(si.splev(u, self.spline[0], der=1), dtype=np.float64).T
+        #     np.array(si.splev(u, self.spline, der=1), dtype=np.float64).T
         # )
         return normalize_2d(self.first_deriv_at(u))
 
@@ -131,12 +136,18 @@ class BSpline2D:
             raise ValueError("At least one of x or y should be provided!")
 
         result = minimize(
+            # lambda u: np.linalg.norm(
+            #     self.evaluate_at(u[0]) - np.array([
+            #         x if x is not None else self.evaluate_at(u[0])[0],
+            #         y if y is not None else self.evaluate_at(u[0])[1]
+            #     ])
+            # ),
             lambda u: (
                 lambda a: np.linalg.norm(a - np.array([
                     x if x is not None else a[0],
                     y if y is not None else a[1]
                 ]))
-            )(self.evaluate_at(u)),
+            )(self.evaluate_at(u[0])),
             0.5,
             bounds=[(0., 1)],
             method="SLSQP"
@@ -148,35 +159,94 @@ class BSpline2D:
             print("Failed to find u!")
             return float("nan")
 
+
+# TODO split in upper/lower surface and merged surface classes
 class CompositeBezierBspline(BSpline2D):
-    """Creates a composite B-spline representation of a set of points.
+    """Creates a composite B-spline representation of a set of points or a set
+    of ClampedBezierCurves.
     Bsplines are clamped in the first, last, and middle control points to
     function as Bezier curves.
 
     Args:
         points: A set of 2D row-vectors
-        n_control_points: Number of control points per spline segment (upper and
+        n_control_points: Number of control points (n) per spline segment (upper and
                           lower surfaces). Defaults to 6.
-        control_point_spacing: Spacing between control points when location is
-                                fixed but not predefined. Defaults to None.
+        control_point_spacing: Either Spacing between control points when location is
+                                fixed but not predefined (currently supports
+                                "cosine" and "linear" spacing), or an array of
+                                control points x-ordinates.
+                                Defaults to "Cosine" spacing.
     """
-
     def __init__(
             self, points: np.ndarray,
-            n_control_points: Optional[int] = 6,
+            degree: Optional[int] = None,
+            n_control_points: Optional[int] = None,
             control_point_spacing: Union[str, np.ndarray] = None,
-            x_control_points: Optional[np.ndarray] = None,
         ):
+
+        if not n_control_points and not degree and not isinstance(control_point_spacing, np.ndarray):
+            raise ValueError(
+                "Either degree or n_control_points must be provided."
+                )
+        elif degree and n_control_points:
+            if degree != n_control_points - 1:
+                raise ValueError(
+                    "If both degree and n_control_points are provided, they must satisfy the relation degree = n_control_points - 1."
+                    )
+
+        if isinstance(control_point_spacing, np.ndarray):
+            if len(control_point_spacing) != self.n_control_points:
+                raise ValueError(
+                    "When specifying control point x-ordinates, Length of control_point_spacing must be equal to n_control_points."
+                    )
+
+
         self.points = points
         self._n_control_points = n_control_points
-        self._x_control_points = x_control_points
+        self._degree = degree
+        # self._x_control_points = x_control_points
         self.control_point_spacing = control_point_spacing
 
     @cached_property
+    def degree(self) -> int:
+        """
+        If degree is specified, return it.
+        Otherwise, calculate the degree of the spline based on the number of
+        control points per segment (n). The degree is the number of control
+        points per segment minus 1: p =(n-1).
+
+        Returns:
+            int: spline degree per segment (uppper/lower surface)
+        """
+        return self._degree if self._degree else self.n_control_points - 1
+
+    @cached_property
+    def n_control_points(self) -> int:
+        """
+        If number of control points (n) is specified, return it.
+        Otherwise, calculate the number of control points based on the specified
+        spline degree (p). The number of control points is the degree of the
+        spline plus 1: n = (p+1).
+
+        Returns:
+            int: number of control points per segment (uppper/lower surface)
+        """
+        if self._n_control_points:
+            return self._n_control_points
+        elif isinstance(self.control_point_spacing, np.ndarray):
+            return len(self.control_point_spacing)
+        else:
+            return self.degree + 1
+
+    @cached_property
+    def n_knots(self):
+        return self.n_control_points + self.degree + 1
+
+    @cached_property
     def x_control_points(self):
-        if self._x_control_points:
-            return self._x_control_points
-        elif self.control_point_spacing:
+        if isinstance(self.control_point_spacing, np.ndarray):
+            return self.control_point_spacing
+        elif isinstance(self.control_point_spacing, str):
             match self.control_point_spacing:
                 case "cosine":
                     return cosine_spacing(0, 1, self.n_control_points)
@@ -185,22 +255,11 @@ class CompositeBezierBspline(BSpline2D):
         else:
             return np.linspace(0, 1, self.n_control_points)
 
-
     @cached_property
-    def degree(self):
-        return self.n_control_points - 1
+    def y_upper_control(self):
+        """Calculate the y-coordinates of the upper surface control points."""
 
-    @cached_property
-    def n_control_points(self):
-        if self._n_control_points:
-            return self._n_control_points
-        else:
-            return self.degree + 1
-
-    @cached_property
-    def n_knots(self):
-        return self.n_control_points + self.degree + 1
-
+        return
 
 
     @cached_property
@@ -216,18 +275,13 @@ class CompositeBezierBspline(BSpline2D):
         y = np.concatenate(
             (
                 [0.001],
-                cosine_spacing(1, 0, 5 - 2),
+                y_upper_control[::-1],
                 [0],
-                cosine_spacing(0, 1, 5 - 2),
+                y_lower_control,
                 [0.001]
             )
         )
-        return np.concatenate(
-                (
-                    self.control_points_upper,
-                    self.control_points_lower[1:]
-                )
-            )
+        return np.column_stack((x, y))
 
     @cached_property
     def knot_value(self):
@@ -238,7 +292,7 @@ class CompositeBezierBspline(BSpline2D):
         return parameters[len(parameters)//2]                                                  # Compute knot value at knot point (middle of parameters)
 
     @cached_property
-    def knots(self):
+    def combined_knots(self):
         """Create a single, continuous knot vector for the combined spline.
 
         Number of knot points should be number of control points + degree + 1
@@ -265,3 +319,157 @@ class CompositeBezierBspline(BSpline2D):
         """
         return np.array([self.combined_knots, self.combined_control_points.T, self.degree])
 
+
+
+class ClampedBezierCurve(BSpline2D):
+    """
+    Creates a B-spline definition which function as a Bezier curve by
+    clamping the first and last control points.
+
+    Args:
+        points: A set of 2D row-vectors
+        n_control_points: Number of control points (n) per spline segment (upper and
+                          lower surfaces). Defaults to 6.
+        control_point_spacing: Spacing between control points when location is
+                                fixed but not predefined. Defaults to None.
+    """
+    def __init__(
+            self, points: np.ndarray,
+            degree: Optional[int] = None,
+            n_control_points: Optional[int] = None,
+            control_point_spacing: Union[str, np.ndarray] = None,
+        ):
+
+        if not n_control_points and not degree and not isinstance(control_point_spacing, np.ndarray):
+            raise ValueError(
+                "Either degree or n_control_points must be provided."
+                )
+        elif degree and n_control_points:
+            if degree != n_control_points - 1:
+                raise ValueError(
+                    "If both degree and n_control_points are provided, they must satisfy the relation degree = n_control_points - 1."
+                    )
+
+        if isinstance(control_point_spacing, np.ndarray):
+            if len(control_point_spacing) != self.n_control_points:
+                raise ValueError(
+                    "When specifying control point x-ordinates, Length of control_point_spacing must be equal to n_control_points."
+                    )
+            if control_point_spacing[0] != 0 or control_point_spacing[-1] != 1:
+                raise ValueError(
+                    "When specifying control point x-ordinates, the first and last control points must be located at 0 and 1, respectively."
+                    )
+
+
+        self.points = points
+        self._n_control_points = n_control_points
+        self._degree = degree
+        self.control_point_spacing = control_point_spacing
+
+    @cached_property
+    def degree(self) -> int:
+        """
+        If degree is specified, return it.
+        Otherwise, calculate the degree of the spline based on the number of
+        control points per segment (n). The degree is the number of control
+        points per segment minus 1: p =(n-1).
+
+        Returns:
+            int: spline degree per segment (uppper/lower surface)
+        """
+        return self._degree if self._degree else self.n_control_points - 1
+
+    @cached_property
+    def n_control_points(self) -> int:
+        """
+        If number of control points (n) is specified, return it.
+        Otherwise, calculate the number of control points based on the specified
+        spline degree (p). The number of control points is the degree of the
+        spline plus 1: n = (p+1).
+
+        Returns:
+            int: number of control points per segment (uppper/lower surface)
+        """
+        if self._n_control_points:
+            return self._n_control_points
+        elif isinstance(self.control_point_spacing, np.ndarray):
+            return len(self.control_point_spacing)
+        else:
+            return self.degree + 1
+
+    @cached_property
+    def n_knots(self):
+        return self.n_control_points + self.degree + 1
+
+    @cached_property
+    def x_control_points(self):
+        if isinstance(self.control_point_spacing, np.ndarray):
+
+            return self.control_point_spacing
+
+        elif isinstance(self.control_point_spacing, str):
+            match self.control_point_spacing:
+                case "cosine":
+                    return cosine_spacing(0, 1, self.n_control_points-1)
+                case "linear":
+                    return np.linspace(0, 1, self.n_control_points-1)
+
+        else:
+            return np.linspace(0, 1, self.n_control_points)
+
+    @cached_property
+    def y_control_points(self):
+        """Calculate the y-coordinates of the upper surface control points."""
+        # TODO make normal splprep spline to sample points properly
+        # TODO use linalg.norm from sampled points as objective
+        return y_control_points
+
+
+    @cached_property
+    def control_points(self):
+        """Combine the upper and lower surface control points."""
+        x = np.concatenate(
+            (
+                cosine_spacing(1, 0, self.n_control_points - 1),
+                [0],
+                cosine_spacing(1, 0, self.n_control_points - 1)[1:],
+            )
+        )
+        y = np.concatenate(
+            (
+                [0.001],
+                y_upper_control[::-1],
+                [0],
+                y_lower_control,
+                [0.001]
+            )
+        )
+        return np.column_stack((x, y))
+
+    @cached_property
+    def knots(self):
+        """Create a single, continuous knot vector for the combined spline.
+
+        Number of knot points should be number of control points + degree + 1
+        (n+p+1). The degree of the spline is the number of control points per
+        segment minus 1: p =(n-1). There must be at least one more distinct knot
+        value than the number of spline segments (in this case 2: upper and
+        lower surface).
+
+        To clamp the endpoints, the first and last knot point values must repeat
+        p+1 times, or in other words the first and last p+1 knot values must be
+        0 and 1, respectively. The knot point connecting the two curves should
+        repeat p times for C2 continuity.
+        """
+        return np.concatenate(([0]*(self.degree+1), [1]*(self.degree+1)))
+
+    @cached_property
+    def spline(self):
+        """1D spline representation of :py:attr:`points`.
+
+        Returns:
+            Scipy 1D spline representation:
+                [0]: Tuple of knots, the B-spline coefficients, degree
+                     of the spline.
+        """
+        return np.array([self.combined_knots, self.combined_control_points.T, self.degree])
