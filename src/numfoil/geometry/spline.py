@@ -128,20 +128,8 @@ class BSpline2D:
     def find_u(self, x: float = None, y: float = None) -> float:
         """Find the parametric value ``u`` for a given point ``(x, y)``."""
         if x is None and y is None:
-            print("At least one of x or y should be provided!")
-            return float("nan")
+            raise ValueError("At least one of x or y should be provided!")
 
-        # result = minimize(
-        #     lambda u: np.linalg.norm(
-        #         (a := self.evaluate_at(u)) - np.array([
-        #             x if x is not None else a[0],
-        #             y if y is not None else a[1]
-        #             ])
-        #     ),
-        #     0.5,
-        #     bounds=[(0., 1)],
-        #     method="SLSQP"
-        # )
         result = minimize(
             lambda u: (
                 lambda a: np.linalg.norm(a - np.array([
@@ -169,26 +157,27 @@ class CompositeBezierBspline(BSpline2D):
         points: A set of 2D row-vectors
         n_control_points: Number of control points per spline segment (upper and
                           lower surfaces). Defaults to 6.
-        control_point_spaceing: Spacing between control points when location is
+        control_point_spacing: Spacing between control points when location is
                                 fixed but not predefined. Defaults to None.
     """
 
     def __init__(
             self, points: np.ndarray,
             n_control_points: Optional[int] = 6,
-            control_point_spaceing: Union[str, np.ndarray] = None,
+            control_point_spacing: Union[str, np.ndarray] = None,
             x_control_points: Optional[np.ndarray] = None,
         ):
         self.points = points
         self._n_control_points = n_control_points
         self._x_control_points = x_control_points
+        self.control_point_spacing = control_point_spacing
 
     @cached_property
     def x_control_points(self):
         if self._x_control_points:
             return self._x_control_points
-        elif self.control_point_spaceing:
-            match self.control_point_spaceing:
+        elif self.control_point_spacing:
+            match self.control_point_spacing:
                 case "cosine":
                     return cosine_spacing(0, 1, self.n_control_points)
                 case "linear":
@@ -212,9 +201,27 @@ class CompositeBezierBspline(BSpline2D):
     def n_knots(self):
         return self.n_control_points + self.degree + 1
 
+
+
     @cached_property
     def combined_control_points(self):
         """Combine the upper and lower surface control points."""
+        x = np.concatenate(
+            (
+                cosine_spacing(1, 0, self.n_control_points - 1),
+                [0],
+                cosine_spacing(1, 0, self.n_control_points - 1)[1:],
+            )
+        )
+        y = np.concatenate(
+            (
+                [0.001],
+                cosine_spacing(1, 0, 5 - 2),
+                [0],
+                cosine_spacing(0, 1, 5 - 2),
+                [0.001]
+            )
+        )
         return np.concatenate(
                 (
                     self.control_points_upper,
