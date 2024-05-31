@@ -990,6 +990,11 @@ class FileAirfoil(PointsAirfoil):
 class ProcessedFileAirfoil(ProcessedPointsAirfoil):
     def __init__(self, filepath: str):
         self.filepath = filepath
+        self._points = self.unprocessed_points
+
+    def parse_file(self) -> np.ndarray:
+        """UIUC files are ordered correctly and have 1 header line."""
+        return np.genfromtxt(self.filepath, skip_header=1)
 
     @cached_property
     def unprocessed_points(self) -> np.ndarray:
