@@ -28,7 +28,6 @@ class BSpline2D:
     def degree(self) -> int:
         return self._degree
 
-
     @cached_property
     def spline(self):
         """1D spline representation of :py:attr:`points`.
@@ -136,12 +135,6 @@ class BSpline2D:
             raise ValueError("At least one of x or y should be provided!")
 
         result = minimize(
-            # lambda u: np.linalg.norm(
-            #     self.evaluate_at(u[0]) - np.array([
-            #         x if x is not None else self.evaluate_at(u[0])[0],
-            #         y if y is not None else self.evaluate_at(u[0])[1]
-            #     ])
-            # ),
             lambda u: (
                 lambda a: np.linalg.norm(a - np.array([
                     x if x is not None else a[0],
@@ -167,6 +160,8 @@ class CompositeBezierBspline(BSpline2D):
     Bsplines are clamped in the first, last, and middle control points to
     function as Bezier curves.
 
+    Meant to define the entire surface of an airfoil.
+
     Args:
         points: A set of 2D row-vectors
         n_control_points: Number of control points (n) per spline segment (upper and
@@ -188,6 +183,7 @@ class CompositeBezierBspline(BSpline2D):
             raise ValueError(
                 "Either degree or n_control_points must be provided."
                 )
+
         elif degree and n_control_points:
             if degree != n_control_points - 1:
                 raise ValueError(
@@ -199,12 +195,14 @@ class CompositeBezierBspline(BSpline2D):
                 raise ValueError(
                     "When specifying control point x-ordinates, Length of control_point_spacing must be equal to n_control_points."
                     )
-
+            if control_point_spacing[0] != 0 or control_point_spacing[-1] != 1:
+                raise ValueError(
+                    "When specifying control point x-ordinates, the first and last control points must be located at 0 and 1, respectively."
+                    )
 
         self.points = points
         self._n_control_points = n_control_points
         self._degree = degree
-        # self._x_control_points = x_control_points
         self.control_point_spacing = control_point_spacing
 
     @cached_property
@@ -240,26 +238,65 @@ class CompositeBezierBspline(BSpline2D):
 
     @cached_property
     def n_knots(self):
+        """
+        Returns:
+            int: number of knots required to define the spline.
+        """
         return self.n_control_points + self.degree + 1
 
     @cached_property
-    def x_control_points(self):
+    def x_control_points(self) -> np.ndarray:
+        """
+        Return the x-coordinates of the control points.
+        - If control point spacing is specified as an array (with control point
+            x-ordinates), return it.
+        - If control point spacing is specified as a string, return the control
+            points x-ordinates based on the specified spacing.
+        - If control point spacing is not specified, raise a ValueError.
+
+        Raises:
+            ValueError: Missing control point spacing specification.
+
+        Returns:
+            np.ndarray: x-coordinates of the control points.
+        """
         if isinstance(self.control_point_spacing, np.ndarray):
             return self.control_point_spacing
+
         elif isinstance(self.control_point_spacing, str):
             match self.control_point_spacing:
                 case "cosine":
-                    return cosine_spacing(0, 1, self.n_control_points)
+                    return np.insert(cosine_spacing(0, 1, self.n_control_points), 0, 0)
                 case "linear":
-                    return np.linspace(0, 1, self.n_control_points)
+                    return np.insert(np.linspace(0, 1, self.n_control_points), 0, 0)
+
         else:
-            return np.linspace(0, 1, self.n_control_points)
+            raise ValueError("Missing control point spacing specification.")
 
     @cached_property
-    def y_upper_control(self):
+    def y_control(self):
         """Calculate the y-coordinates of the upper surface control points."""
+        def cost_function(y_control_points):
+            y_control_points = np.insert(y_control_points, len(y_control_points)//2, 0)
+            y_control_points = np.insert(y_control_points, 0, 0.001)
+            y_control_points = np.insert(y_control_points, len(y_control_points), 0.001)
+            x_control_points = np.append(self.x_control_points[::-1], self.x_control_points[1:])
+            control_points = np.column_stack((x_control_points, y_control_points))
+            tck = np.array([self.combined_knots, control_points.T, self.degree])
+            u_fine = np.linspace(0, 1, 400)
+            sample = np.array(si.splev(u_fine, tck)).T
+            target = np.array(si.splev(u_fine, super().spline)).T
+            return np.sum((np.linalg.norm(sample-target)*100) ** 2)
 
-        return
+        result = minimize(
+            cost_function,
+            np.hstack((
+                [1]*(self.n_control_points-1),
+                [-1]*(self.n_control_points-1)
+            )),
+            method='L-BFGS-B'
+        )
+        return result.x
 
 
     @cached_property
@@ -275,9 +312,9 @@ class CompositeBezierBspline(BSpline2D):
         y = np.concatenate(
             (
                 [0.001],
-                y_upper_control[::-1],
+                self.y_control[:len(self.y_control)//2:-1],
                 [0],
-                y_lower_control,
+                self.y_control[len(self.y_control)//2:],
                 [0.001]
             )
         )
@@ -292,7 +329,7 @@ class CompositeBezierBspline(BSpline2D):
         return parameters[len(parameters)//2]                                                  # Compute knot value at knot point (middle of parameters)
 
     @cached_property
-    def combined_knots(self):
+    def combined_knots(self) -> np.ndarray:
         """Create a single, continuous knot vector for the combined spline.
 
         Number of knot points should be number of control points + degree + 1
@@ -305,8 +342,15 @@ class CompositeBezierBspline(BSpline2D):
         p+1 times, or in other words the first and last p+1 knot values must be
         0 and 1, respectively. The knot point connecting the two curves should
         repeat p times for C2 continuity.
+
+        returns:
+            np.ndarray: combined knot vector
         """
-        return np.concatenate(([0]*(self.degree+1), [self.knot_value]*self.degree, [1]*(self.degree+1)))     # Create knot vector with knot value at knot point
+        return np.concatenate((
+            [0]*(self.degree+1),            # clamp the first control point (TE)
+            [self.knot_value]*self.degree,  # clamp the middle control point(LE)
+            [1]*(self.degree+1)             # clamp the last control point (TE)
+            ))
 
     @cached_property
     def spline(self):
@@ -326,6 +370,8 @@ class ClampedBezierCurve(BSpline2D):
     Creates a B-spline definition which function as a Bezier curve by
     clamping the first and last control points.
 
+    Meant to define the the upper or lower surface of an airfoil.
+
     Args:
         points: A set of 2D row-vectors
         n_control_points: Number of control points (n) per spline segment (upper and
@@ -338,6 +384,7 @@ class ClampedBezierCurve(BSpline2D):
             degree: Optional[int] = None,
             n_control_points: Optional[int] = None,
             control_point_spacing: Union[str, np.ndarray] = None,
+            control_point_values: Optional[np.ndarray] = None
         ):
 
         if not n_control_points and not degree and not isinstance(control_point_spacing, np.ndarray):
@@ -359,12 +406,18 @@ class ClampedBezierCurve(BSpline2D):
                 raise ValueError(
                     "When specifying control point x-ordinates, the first and last control points must be located at 0 and 1, respectively."
                     )
+            if isinstance(control_point_values, np.ndarray):
+                if len(control_point_values) != self.n_control_points:
+                    raise ValueError(
+                        "When specifying control point y-ordinates, Length of control_point_values must be equal to n_control_points."
+                        )
 
 
         self.points = points
         self._n_control_points = n_control_points
         self._degree = degree
         self.control_point_spacing = control_point_spacing
+        self.control_point_values = control_point_values
 
     @cached_property
     def degree(self) -> int:
@@ -398,13 +451,30 @@ class ClampedBezierCurve(BSpline2D):
             return self.degree + 1
 
     @cached_property
-    def n_knots(self):
+    def n_knots(self) -> int:
+        """
+        Returns:
+            int: number of knots required to define the spline.
+        """
         return self.n_control_points + self.degree + 1
 
     @cached_property
-    def x_control_points(self):
-        if isinstance(self.control_point_spacing, np.ndarray):
+    def x_control_points(self) -> np.ndarray:
+        """
+        Return the x-coordinates of the control points.
+        - If control point spacing is specified as an array (with control point
+            x-ordinates), return it.
+        - If control point spacing is specified as a string, return the control
+            points x-ordinates based on the specified spacing.
+        - If control point spacing is not specified, raise a ValueError.
 
+        Raises:
+            ValueError: Missing control point spacing specification.
+
+        Returns:
+            np.ndarray: x-coordinates of the control points.
+        """
+        if isinstance(self.control_point_spacing, np.ndarray):
             return self.control_point_spacing
 
         elif isinstance(self.control_point_spacing, str):
@@ -415,7 +485,7 @@ class ClampedBezierCurve(BSpline2D):
                     return np.linspace(0, 1, self.n_control_points-1)
 
         else:
-            return np.linspace(0, 1, self.n_control_points)
+            raise ValueError("Missing control point spacing specification.")
 
     @cached_property
     def y_control_points(self):

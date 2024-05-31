@@ -811,17 +811,17 @@ class PointsAirfoil(Airfoil):
         dgap = (self.trailing_edge_gap - gap)/2                                 # upper and lower surface offset at trailing edge
 
         # ! I forgot why I inlcuded this if statement, but it seems to work
-        if len(np.asarray(self.surface.spline[0][1]).T) == len(self.surface.spline[1]):
+        if len(np.asarray(self.surface.spline[1]).T) == len(self.surface.spline[1]):
             ui = self.surface.spline[1]                                         # locations of control points on the spline
             scaling_factors = abs(2*(ui-0.5))**rf                               # scaling factor for displacement effect
         else:
-            ui = np.asarray(self.surface.spline[0][1]).T[:, 0]
+            ui = np.asarray(self.surface.spline[1]).T[:, 0]
             surface_points = self.surface.evaluate_at(ui)
             distances = np.linalg.norm(surface_points - self.trailing_edge, axis=1)
             scaling_factors = (1 - distances)**rf
 
         normals = self.surface.normal_at(ui)                                    # normals at the control points
-        self.surface.spline[0][1] += (                                          # modify spline control points
+        self.surface.spline[1] += (                                          # modify spline control points
             normals * dgap * scaling_factors[:, np.newaxis]
         ).T
         # self.reset(surface=False)                                               # surface spline changed, so interpolators need recalculating, but keep modified spline
@@ -852,11 +852,11 @@ class PointsAirfoil(Airfoil):
         self.lower_surface_at               # recalculate
 
 
-    # ! WORK IN PROGRESS
-    def smooth_surface(self, s: float = 1e-5):
-        # delattr(self, "surface")                                # reset to original surface by forcing recalculation
-        self.surface = BSpline2D(self.points, degree=3, smoothing=s)
-        self.reset(surface=False)
+    # # ! WORK IN PROGRESS
+    # def smooth_surface(self, s: float = 1e-5):
+    #     # delattr(self, "surface")                                # reset to original surface by forcing recalculation
+    #     self.surface = BSpline2D(self.points, degree=3, smoothing=s)
+    #     self.reset(surface=False)
 
 
 
@@ -922,9 +922,9 @@ class ProcessedPointsAirfoil(PointsAirfoil):
         rotation_matrix = np.array([[np.cos(angle), -np.sin(angle)],
                                     [np.sin(angle), np.cos(angle)]])
 
-        surface_spline.spline[0][1] = (                                         # apply translation, scaling, and rotation to surface spline
+        surface_spline.spline[1] = (                                         # apply translation, scaling, and rotation to surface spline
             rotation_matrix @ (
-                (surface_spline.spline[0][1] + translation) * scaling
+                (surface_spline.spline[1] + translation) * scaling
             )
         )
         return surface_spline
