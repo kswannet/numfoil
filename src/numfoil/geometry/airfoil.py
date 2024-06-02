@@ -1002,7 +1002,7 @@ class ProcessedFileAirfoil(ProcessedPointsAirfoil):
         return self.remove_consecutive_duplicates(self.parse_file())
 
 
-class UIUCAirfoil(FileAirfoil):#ProcessedFileAirfoil):#
+class UIUCAirfoil(ProcessedFileAirfoil):#FileAirfoil):#
     """Creates :py:class:`Airfoil` from a UIUC airfoil file."""
 
     def parse_file(self) -> np.ndarray:
