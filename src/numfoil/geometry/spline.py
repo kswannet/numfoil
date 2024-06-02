@@ -7,6 +7,8 @@ import numpy as np
 import scipy.interpolate as si
 from scipy.optimize import minimize
 
+from scipy.spatial import KDTree
+
 from .geom2d import normalize_2d, rotate_2d_90ccw
 from ..util import cosine_spacing
 
@@ -287,6 +289,9 @@ class CompositeBezierBspline(BSpline2D):
             sample = np.array(si.splev(u_fine, tck)).T
             target = np.array(si.splev(u_fine, super().spline)).T
             return np.sum((np.linalg.norm(sample-target)*100) ** 2)
+            # tree = KDTree(sample)
+            # distances, _ = tree.query(target)
+            # return np.sum(distances**2)
 
         result = minimize(
             cost_function,
@@ -370,7 +375,7 @@ class ClampedBezierCurve(BSpline2D):
     Creates a B-spline definition which function as a Bezier curve by
     clamping the first and last control points.
 
-    Meant to define the the upper or lower surface of an airfoil.
+    Meant to define the upper or lower surface of an airfoil.
 
     Args:
         points: A set of 2D row-vectors
@@ -378,13 +383,17 @@ class ClampedBezierCurve(BSpline2D):
                           lower surfaces). Defaults to 6.
         control_point_spacing: Spacing between control points when location is
                                 fixed but not predefined. Defaults to None.
+        trailing_edge_gap: Trailing edge thickness.
+        surface_type: 'upper' or 'lower' to specify the surface.
     """
     def __init__(
             self, points: np.ndarray,
             degree: Optional[int] = None,
             n_control_points: Optional[int] = None,
             control_point_spacing: Union[str, np.ndarray] = None,
-            control_point_values: Optional[np.ndarray] = None
+            control_point_values: Optional[np.ndarray] = None,
+            trailing_edge_gap: Optional[float] = 0.0,
+            surface_type: str = 'upper'
         ):
 
         if not n_control_points and not degree and not isinstance(control_point_spacing, np.ndarray):
@@ -398,7 +407,7 @@ class ClampedBezierCurve(BSpline2D):
                     )
 
         if isinstance(control_point_spacing, np.ndarray):
-            if len(control_point_spacing) != self.n_control_points:
+            if len(control_point_spacing) != n_control_points:
                 raise ValueError(
                     "When specifying control point x-ordinates, Length of control_point_spacing must be equal to n_control_points."
                     )
@@ -407,17 +416,18 @@ class ClampedBezierCurve(BSpline2D):
                     "When specifying control point x-ordinates, the first and last control points must be located at 0 and 1, respectively."
                     )
             if isinstance(control_point_values, np.ndarray):
-                if len(control_point_values) != self.n_control_points:
+                if len(control_point_values) != n_control_points:
                     raise ValueError(
                         "When specifying control point y-ordinates, Length of control_point_values must be equal to n_control_points."
                         )
-
 
         self.points = points
         self._n_control_points = n_control_points
         self._degree = degree
         self.control_point_spacing = control_point_spacing
         self.control_point_values = control_point_values
+        self.trailing_edge_gap = trailing_edge_gap
+        self.surface_type = surface_type
 
     @cached_property
     def degree(self) -> int:
@@ -467,54 +477,50 @@ class ClampedBezierCurve(BSpline2D):
         - If control point spacing is specified as a string, return the control
             points x-ordinates based on the specified spacing.
         - If control point spacing is not specified, raise a ValueError.
-
-        Raises:
-            ValueError: Missing control point spacing specification.
-
-        Returns:
-            np.ndarray: x-coordinates of the control points.
         """
         if isinstance(self.control_point_spacing, np.ndarray):
-            return self.control_point_spacing
+            return self.control_point_spacing  # Not including leading and trailing points
 
         elif isinstance(self.control_point_spacing, str):
             match self.control_point_spacing:
                 case "cosine":
-                    return cosine_spacing(0, 1, self.n_control_points-1)
+                    return cosine_spacing(0, 1, self.n_control_points - 1)  # Using total n_control_points minus the manual additions
                 case "linear":
-                    return np.linspace(0, 1, self.n_control_points-1)
+                    return np.linspace(0, 1, self.n_control_points - 1)
 
         else:
             raise ValueError("Missing control point spacing specification.")
 
     @cached_property
-    def y_control_points(self):
-        """Calculate the y-coordinates of the upper surface control points."""
-        # TODO make normal splprep spline to sample points properly
-        # TODO use linalg.norm from sampled points as objective
-        return y_control_points
-
-
-    @cached_property
     def control_points(self):
-        """Combine the upper and lower surface control points."""
-        x = np.concatenate(
-            (
-                cosine_spacing(1, 0, self.n_control_points - 1),
-                [0],
-                cosine_spacing(1, 0, self.n_control_points - 1)[1:],
-            )
+        """Calculate the y-coordinates of the control points including constraints."""
+        def objective_function(y_values):
+            """ Compute the sum of squared distances from airfoil points to the spline. """
+            control_points = np.concatenate((
+                np.array([[0,0]]),
+                np.column_stack((self.x_control_points[:-1], y_values)),
+                np.array([[1,0]])
+            ))
+            tck = (self.knots, control_points.T, self.degree)
+            u = np.linspace(0, 1, 400)
+            curve_points = np.array(si.splev(u, tck)).T
+            tree = KDTree(curve_points)
+            distances, _ = tree.query(self.points)
+            return np.sum(distances**2)
+
+        result = minimize(
+            objective_function,
+            np.array([0.5] * (self.n_control_points - 2)),
+            method='SLSQP', #'L-BFGS-B',
+            options={'maxiter': 1e6, 'ftol': 1e-9}
         )
-        y = np.concatenate(
-            (
-                [0.001],
-                y_upper_control[::-1],
-                [0],
-                y_lower_control,
-                [0.001]
-            )
-        )
-        return np.column_stack((x, y))
+
+        return np.concatenate((
+                np.array([[0,0]]),
+                np.column_stack((self.x_control_points[:-1], result.x)),
+                np.array([[1,0]])
+            ))
+
 
     @cached_property
     def knots(self):
@@ -531,7 +537,7 @@ class ClampedBezierCurve(BSpline2D):
         0 and 1, respectively. The knot point connecting the two curves should
         repeat p times for C2 continuity.
         """
-        return np.concatenate(([0]*(self.degree+1), [1]*(self.degree+1)))
+        return np.concatenate(([0] * (self.degree + 1), [1] * (self.degree + 1)))
 
     @cached_property
     def spline(self):
@@ -542,4 +548,4 @@ class ClampedBezierCurve(BSpline2D):
                 [0]: Tuple of knots, the B-spline coefficients, degree
                      of the spline.
         """
-        return np.array([self.combined_knots, self.combined_control_points.T, self.degree])
+        return (self.knots, self.control_points.T, self.degree)
