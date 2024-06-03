@@ -72,17 +72,56 @@ def split_at_le(
     )
 
 
-def cosine_spacing(start, stop, num):
+def cosine_spacing(start: float, stop: float, num: int) -> np.ndarray:
     """Return cosine-spaced numbers over a specified interval.
     Returns `num` cosine-spaced samples, calculated over the
     interval [`start`, `stop`].
 
     Args:
-        start (array_like): the starting value of the sequence.
-        stop (array_like): the end value of the sequence.
+        start (float): the starting value of the sequence.
+        stop (float): the end value of the sequence.
         num (int): number of samples to generate. Must be non-negative.
 
     Returns:
         ndarray: `num` cosine-spaced samples in interval [`start`, `stop`]
     """
     return start + (stop - start) * 0.5 * (1 - np.cos(np.linspace(0, np.pi, num=num)))
+
+def chebyshev_nodes(start: float, end:float , num: int) -> np.ndarray:
+    """Return Chebyshev-Lobatto nodes over a specified interval.
+    Chebyshev-Lobatto nodes cluster more densely at the interval ends and
+    include the end-points.
+
+    Currently appends the endpoints to the chebyshev sequence.
+    Another option is to map the nodes from the interval [-1, 1] to the
+    interval [`start`, `end`] directly instead of first mapping to [0, 1] and
+    then scaling:
+        # nodes = np.cos(np.pi * (num - 1 - np.arange(num)) / (num - 1))
+        # return 0.5 * (end - start) * (nodes + 1) + start
+
+    However, the current implementation results in higher concentration of
+    nodes at the interval ends.
+
+    Args:
+        start (float): the starting value of the sequence.
+        end (float): the end value of the sequence.
+        num (int): number of samples to generate. Must be non-negative.
+
+    Returns:
+        np.ndarray: `num` Chebyshev nodes in interval [`start`, `end`]
+    """
+    num -= 2                            # account for the end points
+    nodes = np.cos((2 * np.arange(num) + 1) / (2 * num) * np.pi)
+    nodes = 0.5 * (1 - nodes)           # Map [-1,1] Chebyshev nodes to [0,1]
+    return np.concatenate((
+        [0],                            # append start
+        start + (end - start) * nodes,  # scale nodes to interval
+        [1]                             # append end
+        ))
+
+
+def weighted_endpoint_spacing(start, end, num_points, weight_func=np.sqrt):
+    """Generate points with adjustable weighting for endpoint concentration."""
+    linear_points = np.linspace(0, 1, num_points)
+    weighted_points = weight_func(linear_points) / weight_func(1)
+    return start + (end - start) * weighted_points
