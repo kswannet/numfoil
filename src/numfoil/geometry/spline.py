@@ -177,7 +177,7 @@ class ClampedBezierCurve(BSpline2D):
             self, points: np.ndarray,
             # degree: Optional[int] = None,
             n_control_points: Optional[int] = 8,
-            control_point_spacing: Union[str, np.ndarray] = None,
+            control_point_spacing: Union[str, np.ndarray] = 'cosine',
             control_point_values: Optional[np.ndarray] = None,
         ):
 
@@ -294,12 +294,14 @@ class ClampedBezierCurve(BSpline2D):
             curve_points = np.array(si.splev(u, tck)).T
             distances, _ = KDTree(curve_points).query(self.points)
             # distances = np.min(np.linalg.norm(curve_points[:, None, :] - self.points[None, :, :], axis=2), axis=0)
+            # target_points = BSpline2D(self.points).evaluate_at(u)
+            # distances = np.min(np.linalg.norm(curve_points[:, None, :] - target_points[None, :, :], axis=2), axis=0)
             return np.sum(distances)**2
 
         result = opt.minimize(
             objective_function,
             # np.array([np.mean(self.points)] * (self.n_control_points - 1)),
-            self.points.T[1][np.linspace(5, len(self.points)-2, num=self.n_control_points-2, dtype=int)],
+            self.points.T[1][np.linspace(5, len(self.points)-2, num=self.n_control_points-1, dtype=int)],
             method='SLSQP', #'L-BFGS-B',
             options={'maxiter': 1e6, 'ftol': 1e-12}
         )
@@ -344,7 +346,7 @@ class ClampedBezierCurve(BSpline2D):
     # TODO: This is currently unused, but could be useful later. idk if it is
     # TODO  worth replacing the current use of splev with this instead to get a
     # TODO  more proper bezier curve definition.
-    def bezier_curve(self, u: Union[float, np.ndarray]) -> np.ndarray:
+    def bezier_curve_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
         """Bezier curve evaluation of the spline at location u.
 
         Args:
@@ -385,21 +387,11 @@ class CompositeBezierBspline(BSpline2D):
     """
     def __init__(
             self, points: np.ndarray,
-            degree: Optional[int] = None,
-            n_control_points: Optional[int] = None,
-            control_point_spacing: Union[str, np.ndarray] = None,
+            n_control_points: Optional[int] = 8,
+            control_point_spacing: Union[str, np.ndarray] = 'cosine',
+            control_point_values: Optional[np.ndarray] = None,
         ):
 
-        if not n_control_points and not degree and not isinstance(control_point_spacing, np.ndarray):
-            raise ValueError(
-                "Either degree or n_control_points must be provided."
-                )
-
-        elif degree and n_control_points:
-            if degree != n_control_points - 1:
-                raise ValueError(
-                    "If both degree and n_control_points are provided, they must satisfy the relation degree = n_control_points - 1."
-                    )
 
         if isinstance(control_point_spacing, np.ndarray):
             if len(control_point_spacing) != self.n_control_points:
@@ -413,7 +405,6 @@ class CompositeBezierBspline(BSpline2D):
 
         self.points = points
         self._n_control_points = n_control_points
-        self._degree = degree
         self.control_point_spacing = control_point_spacing
 
     @cached_property
