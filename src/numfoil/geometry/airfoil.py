@@ -794,6 +794,8 @@ class PointsAirfoil(Airfoil):
             return float('nan'), float('nan')
 
     # ! WORK IN PROGRESS
+    # TODO this must be revised, it still uses the u output of spline which was
+    # TODO      removed.
     def set_trailing_edge_gap(self, gap, rf: int = 10):
         """ WORK IN PROGRESS
         Set trailing edge gap.
