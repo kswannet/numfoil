@@ -28,7 +28,7 @@ import scipy.interpolate as si
 from scipy.optimize import minimize
 
 from .geom2d import normalize_2d, rotate_2d_90ccw
-from .spline import BSpline2D
+from .spline import BSpline2D, ClampedBezierCurve, CompositeBezierBspline
 from ..util import Container, cosine_spacing
 
 # TODO Add NACA5 series Airfoil as a fun nice-to-have feature
@@ -319,6 +319,7 @@ class PointsAirfoil(Airfoil):
     """
 
     def __init__(self, points: np.ndarray):
+        self.unprocessed_points = points
         self.points = self.remove_consecutive_duplicates(points)
 
     @cached_property
@@ -500,7 +501,7 @@ class PointsAirfoil(Airfoil):
             interpolator results: camber(line) y (ordinate) at x.
         """
         u = cosine_spacing(0, 1, num=200)
-        x, y = self.camber_line.evaluate_at(u).T
+        x, y = self.camber_line.evaluate_at(u).T.round(10)
         return si.PchipInterpolator(x, y, extrapolate=False)
 
     def camber_at(self, x: Union[float, np.ndarray]) -> np.ndarray:
@@ -877,8 +878,8 @@ class ProcessedPointsAirfoil(PointsAirfoil):
     leading edge (foremost), requiring translation again, or vice versa.
     """
     def __init__(self, points: np.ndarray):
-        self.unprocessed_points = self.remove_consecutive_duplicates(points)
-        self._points = self.unprocessed_points
+        self.unprocessed_points = points
+        self._points = self.remove_consecutive_duplicates(points)
         # self.set_trailing_edge_gap(0.001, rf=25)
 
     @cached_property
@@ -1043,6 +1044,56 @@ class UIUCAirfoil(ProcessedFileAirfoil):#FileAirfoil):#
             AIRFOIL_REPR_REGEX, f".UIUCAirfoil.{os.path.splitext(os.path.basename(self.filepath))[0]}", super().__repr__()
         )
 
+class BezierAirfoil(ProcessedPointsAirfoil):
+    def __init__(self,
+                 airfoil: np.ndarray,
+                 n_control_points: int = 12,
+                 spacing: str = "cosine"
+                 ):
+        self._airfoil = airfoil
+        self.n_control_points = n_control_points
+        self.control_point_spacing = spacing
+        self.unprocessed_points = self._airfoil.unprocessed_points
+
+    @cached_property
+    def upper_surface(self) -> ClampedBezierCurve:
+        return ClampedBezierCurve(
+            self._airfoil.upper_surface.evaluate_at(
+                cosine_spacing(0, 1, 200)),
+                n_control_points=self.n_control_points,
+                control_point_spacing=self.control_point_spacing
+            )
+
+    @cached_property
+    def lower_surface(self) -> ClampedBezierCurve:
+        return ClampedBezierCurve(
+            self._airfoil.lower_surface.evaluate_at(
+                cosine_spacing(0, 1, 200)),
+                n_control_points=self.n_control_points,
+                control_point_spacing=self.control_point_spacing
+            )
+
+
+    @cached_property
+    def surface(self):
+        control_points = np.vstack(
+            (
+                self.upper_surface.control_points[::-1],
+                self.lower_surface.control_points[1:]
+            )
+        )
+        return CompositeBezierBspline(
+            control_points,
+            self._airfoil.u_leading_edge
+            )
+
+
+    # @cached_property
+    # def surface(self) -> BSpline2D:
+    #     return ClampedBezierCurve(self.points)
+
+
+
 
 class AirfoilPlot:
     """ Create a plotter object with ready functions to plot different
@@ -1064,6 +1115,7 @@ class AirfoilPlot:
             leading_edge_radius=None,
             leading_edge_angle=None,
             points=None,
+            unprocessed_points=None,
             max_camber=None,
             max_thickness=None,
             max_curvature=None,
@@ -1077,6 +1129,9 @@ class AirfoilPlot:
             camber_curvature=[],
             trailing_edge_wedgedge=[],
             trailing_edge_angle=None,
+            control_points=None,
+            upper_control_points=None,
+            lower_control_points=None,
         )
 
         self.colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
@@ -1204,6 +1259,68 @@ class AirfoilPlot:
                 )[0]
             # self.ax.add_line(self.elements.points)
         self.ax.legend()
+
+    @property
+    def unprocessed_points(self):
+        if self.elements.unprocessed_points:
+            self.elements.unprocessed_points.remove()
+            self.elements.unprocessed_points = None
+        elif hasattr(self.airfoil, "unprocessed_points"):
+            pts = self.airfoil.unprocessed_points
+            self.elements.unprocessed_points = plt.plot(
+                pts[:, 0], pts[:, 1], 'x', label="Unprocessed Airfoil Coordinate",
+                color=self.colors[4]
+                )[0]
+            # self.ax.add_line(self.elements.unprocessed_points)
+        else:
+            print("No unprocessed points found")
+        self.ax.legend()
+
+    @property
+    def control_points(self):
+        if self.elements.control_points:
+            self.elements.control_points.remove()
+            self.elements.control_points = None
+        elif hasattr(self.airfoil.surface, "control_points"):
+            pts = self.airfoil.surface.control_points
+            self.elements.control_points = plt.plot(
+                pts[:, 0], pts[:, 1], 'bo-', label="Bezier Control Points",
+                )[0]
+            # self.ax.add_line(self.elements.control_points)
+        else:
+            print("No control points found")
+        self.ax.legend()
+
+    @property
+    def upper_control_points(self):
+        if self.elements.upper_control_points:
+            self.elements.upper_control_points.remove()
+            self.elements.upper_control_points = None
+        elif hasattr(self.airfoil.upper_surface, "control_points"):
+            pts = self.airfoil.upper_surface.control_points
+            self.elements.upper_control_points = plt.plot(
+                pts[:, 0], pts[:, 1], 'bo-', label="Bezier Control Points",
+                )[0]
+            # self.ax.add_line(self.elements.control_points)
+        else:
+            print("No control points found")
+        self.ax.legend()
+
+    @property
+    def lower_control_points(self):
+        if self.elements.lower_control_points:
+            self.elements.lower_control_points.remove()
+            self.elements.lower_control_points = None
+        elif hasattr(self.airfoil.lower_surface, "control_points"):
+            pts = self.airfoil.lower_surface.control_points
+            self.elements.lower_control_points = plt.plot(
+                pts[:, 0], pts[:, 1], 'bo-', label="Bezier Control Points",
+                )[0]
+            # self.ax.add_line(self.elements.control_points)
+        else:
+            print("No control points found")
+        self.ax.legend()
+
 
     @property
     def leading_edge_point(self):
@@ -1538,13 +1655,15 @@ class AirfoilPlot:
         delattr(self.airfoil, "plot")
 
     def plot_all(self):
-        self.leading_edge_radius
-        self.leading_edge_angle
-        self.max_camber
-        self.max_thickness
-        self.max_curvature
-        self.trailing_edge_angle
-        self.trailing_edge_wedgedge
+        for prop in self.elements.__dict__.keys():
+            getattr(self, prop)
+        # self.leading_edge_radius
+        # self.leading_edge_angle
+        # self.max_camber
+        # self.max_thickness
+        # self.max_curvature
+        # self.trailing_edge_angle
+        # self.trailing_edge_wedgedge
 
 
 
