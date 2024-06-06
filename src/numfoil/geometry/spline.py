@@ -181,16 +181,6 @@ class ClampedBezierCurve(BSpline2D):
             control_point_values: Optional[np.ndarray] = None,
         ):
 
-        # if not n_control_points and not degree and not isinstance(control_point_spacing, np.ndarray):
-        #     raise ValueError(
-        #         "Either degree or n_control_points must be provided."
-        #         )
-        # elif degree and n_control_points:
-        #     if degree != n_control_points - 1:
-        #         raise ValueError(
-        #             "If both degree and n_control_points are provided, they must satisfy the relation degree = n_control_points - 1."
-        #             )
-
         if isinstance(control_point_spacing, np.ndarray):
             if len(control_point_spacing) != n_control_points:
                 raise ValueError(
@@ -208,7 +198,6 @@ class ClampedBezierCurve(BSpline2D):
 
         self.points = points
         self._n_control_points = n_control_points
-        # self._degree = degree
         self.control_point_spacing = control_point_spacing
         self.control_point_values = control_point_values
 
@@ -347,7 +336,14 @@ class ClampedBezierCurve(BSpline2D):
         0 and 1, respectively. The knot point connecting the two curves should
         repeat p times for C2 continuity.
         """
-        return np.concatenate(([0] * (self.degree + 1), [1] * (self.degree + 1)))
+        # return np.concatenate(([0] * (self.degree + 1), [1] * (self.degree + 1)))
+        # Create a uniform knot vector in the middle
+        middle_knots = np.linspace(0, 1, self.n_knots - 2 * (self.degree + 1))
+
+        # Repeat the first and last knot values to create a clamped knot vector
+        knot_vector = np.concatenate(([0] * (self.degree + 1), middle_knots, [1] * (self.degree + 1)))
+
+        return knot_vector
 
     @cached_property
     def spline(self):
@@ -414,13 +410,13 @@ class CompositeBezierBspline(BSpline2D):
         return self.n_control_points + self.degree + 1
 
 
-    # @cached_property
-    # def knot_value(self):
-    #     """Calculate the knot value for the combined spline.
-    #     This should be the leading edge location of the airfoil."""
-    #     distances = np.sqrt(np.sum(np.diff(self.control_points, axis=0)**2, axis=1))  # Compute distances between control points# Compute distances between control points
-    #     parameters = np.concatenate(([0], np.cumsum(distances) / np.sum(distances)))           # Compute parameter values proportional to distances
-    #     return parameters[len(parameters)//2]                                                  # Compute knot value at knot point (middle of parameters)
+    @cached_property
+    def knot_value(self):
+        """Calculate the knot value for the combined spline.
+        This should be the leading edge location of the airfoil."""
+        distances = np.sqrt(np.sum(np.diff(self.control_points, axis=0)**2, axis=1))  # Compute distances between control points# Compute distances between control points
+        parameters = np.concatenate(([0], np.cumsum(distances) / np.sum(distances)))           # Compute parameter values proportional to distances
+        return parameters[len(parameters)//2]                                                  # Compute knot value at knot point (middle of parameters)
 
     @cached_property
     def knots(self) -> np.ndarray:
