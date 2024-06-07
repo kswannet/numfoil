@@ -958,8 +958,8 @@ class ProcessedPointsAirfoil(PointsAirfoil):
             coordinates (array): 199 airfoil coordinates in Selig format
         """
         u = np.append(
-            cosine_spacing(0, self.u_leading_edge, 100),      # Upper surface LE to TE
-            cosine_spacing(self.u_leading_edge, 1, 100)[1:])  # Lower surface TE to LE
+            cosine_spacing(0, self.u_leading_edge, 80),      # Upper surface LE to TE
+            cosine_spacing(self.u_leading_edge, 1, 80)[1:])  # Lower surface TE to LE
         return self.surface.evaluate_at(u)
 
 
