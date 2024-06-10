@@ -298,17 +298,52 @@ class ClampedBezierCurve(BSpline2D):
             # distances = np.min(np.linalg.norm(curve_points[:, None, :] - target_points[None, :, :], axis=2), axis=0)
             return np.sum(distances)**2
 
-        sign = np.sign(np.median(self.points.T[1]))
-        bounds = [(None, None)] * (self.n_control_points - 2)
-        bounds[0] = bounds[-1] = bounds[-2] = (0.0005*sign, None) if sign >= 0 else (None, 0.0005*sign)
+        # sign = np.sign(np.median(self.points.T[1]))
+        sign = np.sign(self.points.T[1][2])
+
+        # bounds = [(None, None)] * (self.n_control_points - 2)
+        # bounds[0] = bounds[-1] = bounds[-2] = (0.0005*sign, None) if sign >= 0 else (None, 0.0005*sign)
+
+        x,y = self.points[self.points[:, 0] == np.maximum.accumulate(self.points[:, 0])].T
+        init_values = si.pchip_interpolate(x, y, self.x_control_points)
+
+        # init_values = si.pchip_interpolate(self.points.T[0], self.points.T[1], self.x_control_points)
+        # bounds = opt.Bounds(lb=init_values-0.15, ub=init_values+0.15)
+        # if sign >= 0:
+        #     bounds.ub[0] = bounds.ub[-1] = bounds.ub[-2] = 0.0005*sign
+        # elif sign < 0:
+        #     bounds.lb[0] = bounds.lb[-1] = bounds.lb[-2] = 0.0005*sign
+
+        # sign = np.sign(self.points.T[1][2])
+
+
+        lb = init_values - 0.2
+        ub = init_values + 0.2
+
+        if sign >= 0:
+            lb[0] = lb[-1] = lb[-2] = 0.0005 * sign
+        else:
+            ub[0] = ub[-1] = ub[-2] = 0.0005 * sign
+
+        bounds = opt.Bounds(lb, ub)
+
+
+        # Define the constraint matrix
+        A = np.eye(init_values.size) - np.eye(init_values.size, k=-1)
+        lb_diff = -0.15  # Lower bound for the difference
+        ub_diff = 0.15  # Upper bound for the difference
+        linear_constraint = opt.LinearConstraint(A, lb_diff, ub_diff)
+
 
         result = opt.minimize(
             objective_function,
             # np.array([np.mean(self.points)] * (self.n_control_points - 1)),
-            self.points.T[1][np.linspace(5, len(self.points)-2, num=self.n_control_points-2, dtype=int)],
+            # self.points.T[1][np.linspace(5, len(self.points)-2, num=self.n_control_points-2, dtype=int)],
+            init_values,
             method='SLSQP', #'L-BFGS-B',
             options={'maxiter': 1e6, 'ftol': 1e-12},
-            bounds=bounds
+            bounds=bounds,
+            constraints=linear_constraint
         )
 
         return np.concatenate((
@@ -316,7 +351,8 @@ class ClampedBezierCurve(BSpline2D):
                 # np.column_stack((self.x_control_points[:-1], result.x)), # this is to force the trailling edge to y=0
                 np.column_stack((self.x_control_points, result.x)), # this one to have 2 contorl points at x=1 to close the trailing edge with a curve
                 # np.array([[1,0]])
-                np.array([[1,0.0005*np.sign(np.median(self.points.T[1]))]])
+                np.array([[1,0.0005*np.sign(self.points.T[1][2])]])
+                # np.array([[1,0.0005*np.sign(np.median(self.points.T[1]))]])
             ))
 
 
