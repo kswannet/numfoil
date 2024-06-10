@@ -463,7 +463,7 @@ class PointsAirfoil(Airfoil):
         # ! It's an ugly fix, but I don't have a better one atm.
         u = cosine_spacing(0, 1.001, num=200)
         # x, y = self.upper_surface.evaluate_at(u).T
-        points = self.upper_surface.evaluate_at(u)  # because of e.g. ah81k144wfKlappe.dat
+        points = self.upper_surface.evaluate_at(u).round(10)  # because of e.g. ah81k144wfKlappe.dat
         x, y = points[points[:, 0] == np.maximum.accumulate(points[:, 0])].T
         assert np.all(np.diff(x) > 0)
         return si.PchipInterpolator(x, y, extrapolate=False)
@@ -484,7 +484,7 @@ class PointsAirfoil(Airfoil):
         # ! It's an ugly fix, but I don't have a better one atm.
         u = cosine_spacing(0, 1.001, num=200)
         # x, y = self.lower_surface.evaluate_at(u).T
-        points = self.lower_surface.evaluate_at(u)  # because of e.g. ah81k144wfKlappe.dat
+        points = self.lower_surface.evaluate_at(u).round(10)  # because of e.g. ah81k144wfKlappe.dat
         x, y = points[points[:, 0] == np.maximum.accumulate(points[:, 0])].T
         assert np.all(np.diff(x) > 0)
         return si.PchipInterpolator(x, y, extrapolate=False)
@@ -958,8 +958,8 @@ class ProcessedPointsAirfoil(PointsAirfoil):
             coordinates (array): 199 airfoil coordinates in Selig format
         """
         u = np.append(
-            cosine_spacing(0, self.u_leading_edge, 80),      # Upper surface LE to TE
-            cosine_spacing(self.u_leading_edge, 1, 80)[1:])  # Lower surface TE to LE
+            cosine_spacing(0, self.u_leading_edge, 100),      # Upper surface LE to TE
+            cosine_spacing(self.u_leading_edge, 1, 100)[1:])  # Lower surface TE to LE
         return self.surface.evaluate_at(u)
 
 
@@ -1048,7 +1048,7 @@ class BezierAirfoil(ProcessedPointsAirfoil):
     def __init__(self,
                  airfoil: np.ndarray,
                  n_control_points: int = 12,
-                 spacing: str = "linear"
+                 spacing: str = "cosine"
                  ):
         self._airfoil = airfoil
         self.n_control_points = n_control_points
@@ -1073,7 +1073,6 @@ class BezierAirfoil(ProcessedPointsAirfoil):
                 control_point_spacing=self.control_point_spacing
             )
 
-
     @cached_property
     def surface(self):
         control_points = np.vstack(
@@ -1087,6 +1086,24 @@ class BezierAirfoil(ProcessedPointsAirfoil):
             # self._airfoil.u_leading_edge  # leading edge location on parent Bspline
             0.5                             # force leading edge at u=0.5
             )
+
+    @cached_property
+    def points(self) -> np.ndarray:
+        """Return processed airfoil surface coordinates
+        Resample the points form the processed spline, using cosine spacing with
+        a total of 199 points in Selig format: 100 points on upper and lower
+        surface, without the duplicate LE point
+
+        THIS SHOULD BE LINSPACE SINCE THE BEZIER CURVE CLAMPING CHANGES THE
+        SPACING OF THE PARAMETRIC COORDINATE.
+
+        Returns:
+            coordinates (array): 199 airfoil coordinates in Selig format
+        """
+        u = np.append(
+            np.linspace(0, self.u_leading_edge, 100),      # Upper surface LE to TE
+            np.linspace(self.u_leading_edge, 1, 100)[1:])  # Lower surface TE to LE
+        return self.surface.evaluate_at(u)
 
     @cached_property
     def name(self) -> str:
