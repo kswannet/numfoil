@@ -1048,7 +1048,7 @@ class BezierAirfoil(ProcessedPointsAirfoil):
     def __init__(self,
                  airfoil: np.ndarray,
                  n_control_points: int = 12,
-                 spacing: str = "cosine"
+                 spacing: str = "linear"
                  ):
         self._airfoil = airfoil
         self.n_control_points = n_control_points
@@ -1084,8 +1084,17 @@ class BezierAirfoil(ProcessedPointsAirfoil):
         )
         return CompositeBezierBspline(
             control_points,
-            self._airfoil.u_leading_edge
+            # self._airfoil.u_leading_edge  # leading edge location on parent Bspline
+            0.5                             # force leading edge at u=0.5
             )
+
+    @cached_property
+    def name(self) -> str:
+        return f"{self._airfoil.name}_Bezier" if hasattr(self._airfoil, "name") else "BezierAirfoil"
+
+    @cached_property
+    def fullname(self) -> str:
+        return f"{self._airfoil.fullname} Bezier" if hasattr(self._airfoil, "fullname") else "BezierAirfoil"
 
 
     # @cached_property

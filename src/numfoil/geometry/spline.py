@@ -384,10 +384,10 @@ class CompositeBezierBspline(BSpline2D):
     def __init__(
             self,
             control_points: np.ndarray,
-            u_leading_edge: float,
+            u_leading_edge: float = None,
         ):
         self.control_points = control_points
-        self.knot_value = u_leading_edge
+        self._knot_value = u_leading_edge
 
     @cached_property
     def degree(self) -> int:
@@ -411,12 +411,19 @@ class CompositeBezierBspline(BSpline2D):
 
 
     @cached_property
-    def knot_value(self):
-        """Calculate the knot value for the combined spline.
-        This should be the leading edge location of the airfoil."""
-        distances = np.sqrt(np.sum(np.diff(self.control_points, axis=0)**2, axis=1))  # Compute distances between control points# Compute distances between control points
-        parameters = np.concatenate(([0], np.cumsum(distances) / np.sum(distances)))           # Compute parameter values proportional to distances
-        return parameters[len(parameters)//2]                                                  # Compute knot value at knot point (middle of parameters)
+    def knot_value(self) -> float:
+        """
+        If knot value is specified, return it.
+        Else calculate the knot value for the combined spline.
+        This should be the leading edge location of the airfoil.
+        """
+        if self._knot_value:
+            return self._knot_value
+        else:
+            print('No knot value specified. Estimating based on control points...')
+            distances = np.sqrt(np.sum(np.diff(self.control_points, axis=0)**2, axis=1))  # Compute distances between control points# Compute distances between control points
+            parameters = np.concatenate(([0], np.cumsum(distances) / np.sum(distances)))           # Compute parameter values proportional to distances
+            return parameters[len(parameters)//2]                                                  # Compute knot value at knot point (middle of parameters)
 
     @cached_property
     def knots(self) -> np.ndarray:
