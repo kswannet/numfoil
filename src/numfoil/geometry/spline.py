@@ -11,10 +11,71 @@ from scipy.spatial import KDTree
 
 from .geom2d import normalize_2d, rotate_2d_90ccw
 from ..util import cosine_spacing, chebyshev_nodes
+from abc import ABC, abstractmethod
 
 # TODO add CST based spline class
 
-class BSpline2D:
+
+class Curve(ABC):
+    """Abstract base class for defining a spline or curve."""
+
+    def __init__(self, points: np.ndarray):
+        self.points = points
+
+    @property
+    @abstractmethod
+    def spline(self):
+        """Return the spline definition."""
+        pass
+
+    @abstractmethod
+    def evaluate_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
+        """Evaluate the curve point(s) at ``u``."""
+        pass
+
+    @abstractmethod
+    def find_u(self, x: float = None, y: float = None) -> float:
+        """Find the parametric value ``u`` for a given point ``(x, y)``."""
+        pass
+
+    @abstractmethod
+    def first_deriv_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
+        """Evaluate the curve's first derivative(s) at ``u``."""
+        pass
+
+    @abstractmethod
+    def second_deriv_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
+        """Evaluate the curve's second derivative(s) at ``u``."""
+        pass
+
+    @abstractmethod
+    def tangent_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
+        """Evaluate the curve tangent(s) at ``u``."""
+        pass
+
+    @abstractmethod
+    def normal_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
+        """Evaluate the curve normal(s) at ``u``."""
+        pass
+
+    @abstractmethod
+    def curvature_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
+        """Calculate the curve curvature at ``u``."""
+        pass
+
+    @abstractmethod
+    def radius_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
+        """Return the radius of curvature on the curve at given location ``u``."""
+        pass
+
+    @property
+    @abstractmethod
+    def max_curvature(self) -> Tuple[float, float]:
+        """Find the maximum curvature of the curve."""
+        pass
+
+
+class BSpline2D(Curve):
     """Creates a splined representation of a set of points.
 
     Args:
@@ -24,12 +85,12 @@ class BSpline2D:
 
     def __init__(self, points: np.ndarray, degree: Optional[int] = 3, smoothing: Optional[float] = 0.0):
         self.points = points
-        self._degree = degree
+        self.degree = degree
         self.smoothing = smoothing
 
-    @property
-    def degree(self) -> int:
-        return self._degree
+    # @property
+    # def degree(self) -> int:
+    #     return self._degree
 
     @cached_property
     def spline(self):
@@ -47,10 +108,27 @@ class BSpline2D:
         """Evaluate the spline point(s) at ``u``."""
         return np.array(si.splev(u, self.spline, der=0), dtype=np.float64).T
 
+    def find_u(self, x: float = None, y: float = None) -> float:
+        """Find the parametric value ``u`` for a given point ``(x, y)``."""
+        def objective_function(u):
+            return np.linalg.norm(self.evaluate_at(u) - np.array([x, y]))
+
+        result = opt.minimize(
+            objective_function,
+            0.5,
+            bounds=[(0., 1)],
+            method="SLSQP"
+            )
+        if not result.success:
+            print("Failed to find u!")
+        return
+
     def first_deriv_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
+        """Evaluate the spline's first derivative(s) at ``u``."""
         return np.array(si.splev(u, self.spline, der=1), dtype=np.float64).T
 
     def second_deriv_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
+        """Evaluate the spline's second derivative(s) at ``u``."""
         return np.array(si.splev(u, self.spline, der=2), dtype=np.float64).T
 
     def tangent_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
@@ -76,7 +154,6 @@ class BSpline2D:
         return (ddy * dx - ddx * dy) / (dx**2 + dy**2)**1.5
 
     def radius_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
-        # TODO can this be vectorized?
         """returns the radius of curvature on the spline at given location u
 
         Args:
@@ -106,55 +183,31 @@ class BSpline2D:
             print("Failed to find max curvature!")
         return result.x[0], np.sqrt(-result.fun) if result.success else float("nan")
 
-    @property
-    def crest(self) -> Tuple[float, np.ndarray[float, float]]:
-        """Return lowest point of the airfoil.
-        Based on the PARSEC parameter.
+class BSpline1D(BSpline2D):
+    """Creates a splined representation of a set of points.
+    This 1D curve works with coordinates directly, instead of the parametric
+    approach of BSpline2D.
 
-        Raises:
-            Exception: Finding crest failed.
+    Args:
+        points: A set of 2D row-vectors
+        degree: Degree of the spline. Defaults to 3 (cubic spline).
+    """
+
+    def __init__(self, points: np.ndarray, degree: Optional[int] = 3, smoothing: Optional[float] = 0.0):
+        self.points = points
+        self.degree = degree
+        self.smoothing = smoothing
+
+    @cached_property
+    def spline(self):
+        """1D spline representation of :py:attr:`points`.
 
         Returns:
-            Tuple[float, np.ndarray]: [u, [x, y]]: crest location and coordinates.
+            Scipy 1D spline representation:
+                [0]: Tuple of knots, the B-spline coefficients, degree
+                     of the spline.
         """
-        result = opt.minimize(lambda u: -self.evaluate_at(u[0])[1]**2,
-                0.5,
-                bounds=[(0, 1)]
-                )
-
-        if result.success:
-            return result.x[0], self.evaluate_at(result.x[0])
-        else:
-            raise Exception("Finding lower crest failed: " + result.message)
-
-    @property
-    def crest_curvature(self) -> float:
-        """Return the curvature at the crest."""
-        return self.curvature_at(self.crest[0])
-
-    def find_u(self, x: float = None, y: float = None) -> float:
-        """Find the parametric value ``u`` for a given point ``(x, y)``."""
-        if x is None and y is None:
-            raise ValueError("At least one of x or y should be provided!")
-
-        result = opt.minimize(
-            lambda u: (
-                lambda a: np.linalg.norm(a - np.array([
-                    x if x is not None else a[0],
-                    y if y is not None else a[1]
-                ]))
-            )(self.evaluate_at(u[0])),
-            0.5,
-            bounds=[(0., 1)],
-            method="SLSQP"
-        )
-
-        if result.success:
-            return result.x[0]
-        else:
-            print("Failed to find u!")
-            return float("nan")
-
+        return si.splrep(*self.points.T, s=self.smoothing, k=self.degree)[0]
 
 # TODO: implement this with proper bezier curve defintion instead of splev(?)
 class ClampedBezierCurve(BSpline2D):
@@ -354,8 +407,6 @@ class ClampedBezierCurve(BSpline2D):
                 np.array([[1,0.0005*np.sign(self.points.T[1][2])]])
                 # np.array([[1,0.0005*np.sign(np.median(self.points.T[1]))]])
             ))
-
-
 
     @cached_property
     def knots(self):
