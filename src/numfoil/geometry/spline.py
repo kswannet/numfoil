@@ -88,10 +88,6 @@ class BSpline2D(Curve):
         self.degree = degree
         self.smoothing = smoothing
 
-    # @property
-    # def degree(self) -> int:
-    #     return self._degree
-
     @cached_property
     def spline(self):
         """1D spline representation of :py:attr:`points`.
