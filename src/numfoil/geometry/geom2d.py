@@ -114,6 +114,7 @@ def rotate_2d_90ccw(array: np.ndarray, inplace: bool = False) -> np.ndarray:
     Returns:
         Transformed row-vector(s) with dimension (n, 2).
     """
+    # should also work: np.column_stack([-tangents[:, 1], tangents[:, 0]])
     assert is_row_vector(array)
     return np.dot(a=array, b=R_90CCW_MATRIX, out=array if inplace else None)
 

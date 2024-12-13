@@ -14,7 +14,7 @@
 
 """Contains utility functions for pressure coefficient analysis."""
 
-from typing import Sequence, Tuple
+from typing import Sequence, Tuple, Union
 
 import numpy as np
 from scipy.interpolate import interp1d
@@ -35,6 +35,14 @@ class Container:
 
     def __call__(self):
         print("\n".join(f"{k}: {v!r}," for k, v in self.__dict__.items()))
+
+
+def ensure_1d_vector(x: Union[float, np.ndarray]) -> np.ndarray:
+    """Ensures that ``x`` is a 1D vector."""
+    x = np.array([x]) if isinstance(x, (float, int)) else x
+    if len(x.shape) != 1:
+        raise ValueError("Only 1-D np.arrays are supported")
+    return x
 
 
 def delta_cp_from_cp(

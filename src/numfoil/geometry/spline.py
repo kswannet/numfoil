@@ -84,7 +84,8 @@ class BSpline2D(Curve):
     """
 
     def __init__(self, points: np.ndarray, degree: Optional[int] = 3, smoothing: Optional[float] = 0.0):
-        self.points = points
+        # self.points = points
+        super().__init__(points)
         self.degree = degree
         self.smoothing = smoothing
 
@@ -93,9 +94,11 @@ class BSpline2D(Curve):
         """1D spline representation of :py:attr:`points`.
 
         Returns:
-            Scipy 1D spline representation:
-                [0]: Tuple of knots, the B-spline coefficients, degree
-                     of the spline.
+            tck: Tuple of knots, the B-spline coefficients,
+            degree of the spline.
+            #//Scipy 1D spline representation:
+                #//[0]: Tuple of knots, the B-spline coefficients, degree
+                #//     of the spline.
                 #//[1]: Parametric points, u, used to create the spline
         """
         return si.splprep(self.points.T, s=self.smoothing, k=self.degree)[0]
@@ -129,9 +132,6 @@ class BSpline2D(Curve):
 
     def tangent_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
         """Evaluate the spline tangent(s) at ``u``."""
-        # return normalize_2d(
-        #     np.array(si.splev(u, self.spline, der=1), dtype=np.float64).T
-        # )
         return normalize_2d(self.first_deriv_at(u))
 
     def normal_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
@@ -142,12 +142,11 @@ class BSpline2D(Curve):
         """Calculate the spline curvature at ``u``
         k=|y"(x)| / (1+(y'(x))^2)^{3/2}
         """
-        # a = np.abs(self.second_deriv_at(u)[1])
-        # b = (1+self.first_deriv_at(u)[1]**2)**(3/2)
-        # return a/b if b != 0 else 0
         dx, dy = self.first_deriv_at(u).T
         ddx, ddy = self.second_deriv_at(u).T
-        return (ddy * dx - ddx * dy) / (dx**2 + dy**2)**1.5
+        numerator = ddy * dx - ddx * dy     # det([dx, dy], [ddx, ddy])
+        denominator = (dx**2 + dy**2)**1.5  # abs([dx, dy])^3
+        return np.where(denominator != 0, numerator / denominator, 0)
 
     def radius_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
         """returns the radius of curvature on the spline at given location u
@@ -159,7 +158,8 @@ class BSpline2D(Curve):
             np.ndarray: curvature values
         """
         curvature = self.curvature_at(u)
-        return 1 / curvature if curvature != 0 else np.inf
+        # return 1 / curvature if curvature != 0 else np.inf
+        return np.where(curvature != 0, 1 / curvature, np.inf)
 
     # @cached_property
     @property

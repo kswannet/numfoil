@@ -56,7 +56,7 @@ class AirfoilBase(metaclass=ABCMeta):
         return x
 
 
-class GenericAirfoil:
+class Airfoil:
     """Unified airfoil class handling points-based airfoils with inconsistent or missing data."""
 
     def __init__(self, points: Union[np.ndarray, str]):
@@ -80,6 +80,8 @@ class GenericAirfoil:
     def from_file(cls, filepath: str):
         points = np.genfromtxt(filepath, skip_header=1)
         return cls(points)
+
+    
 
 
 
