@@ -3,6 +3,7 @@ from typing import Tuple
 import scipy.interpolate as si
 import scipy.optimize as opt
 from .spline_v2 import BSpline2D, SplevCBezier
+from .geom2d import Point2D, Geom2D
 import os
 
 class AirfoilDataFile:
@@ -31,6 +32,40 @@ class AirfoilDataFile:
             return True  # If conversion fails, it's likely a header
 
     @staticmethod
+    def count_header_lines(filepath: str) -> int:
+        """
+        Count the number of header lines before the coordinate data starts.
+
+        Args:
+            filepath (str): Path to the input file.
+
+        Returns:
+            int: The number of header lines.
+        """
+        def is_valid_coordinates_line(line: str) -> bool:
+            try:
+                # Try to parse the line as numeric data
+                array = np.array([float(value) for value in line.split()])
+                # Ensure it has either 2 elements (a single coordinate) or
+                # matches one of the valid shapes [2, n] or [n, 2] when multiple lines are stacked.
+                return len(array) == 2
+            except ValueError:
+                return False
+
+        header_count = 0
+        with open(filepath, 'r', encoding='utf-8') as file:
+            for line in file:
+                line = line.strip()
+                if not line or line.startswith(("#", "//")) or not is_valid_coordinates_line(line):
+                    # Increment header count for empty lines, comments, or invalid coordinate lines
+                    header_count += 1
+                else:
+                    # Stop counting once valid data is found
+                    break
+
+        return header_count
+
+    @staticmethod
     def load_from_file(filepath: str, header: int) -> np.ndarray:
         """Loads airfoil points from a file."""
         try:
@@ -50,7 +85,8 @@ class AirfoilDataFile:
         """Returns the name of the airfoil from filename."""
         return os.path.splitext(os.path.basename(filepath))[0]
 
-
+# TODO: I feel like this could be merged with the airfoil class, but I have yet
+# TODO: to see the light on how to do this in a nice way.
 class AirfoilProcessor:
     """Processes raw airfoil points for alignment and normalization."""
 
@@ -72,12 +108,30 @@ class AirfoilProcessor:
         """Calculates the trailing edge point."""
         start_point = preliminary_spline.evaluate_at(0)
         end_point = preliminary_spline.evaluate_at(1)
+
+        # ! OF COURSE THERES ANOTHER FUCKING EDGECASE BECAUSE THE DATA IS FUCKED
+        # ! AND THE TRIALING EDGE ISNT PROPERLY DEFINED EBCAUSE WHY THE FUCK WOULD
+        # ! IT BE?????
+        res1 = opt.minimize(lambda u: -np.linalg.norm(np.array([0,0])-preliminary_spline.evaluate_at(u)[0]), 0, bounds=[(0, 1)])
+        res2 = opt.minimize(lambda u: -np.linalg.norm(np.array([0,0])-preliminary_spline.evaluate_at(u)[0]), 1, bounds=[(0, 1)])
+        # if the maximum x value found is not the same at both ends of the
+        # spline, the trailing edge is not properly defined and doubles back on
+        # itself or the coordinates are missing one of the endpoints
+        if abs(res1.fun - res2.fun) > 1e-5:
+            # take location u with maximum x value, most likely to be trailing edge
+            u_TE = res1.x[0] if -res1.fun>-res2.fun else res2.x[0]
+            return preliminary_spline.evaluate_at(u_TE)
+
+
         # if endpoints are both at same x-coordinate, return midpoint
-        if abs(start_point[0] - end_point[0]) < 1e-4:
+        elif abs(start_point[0] - end_point[0]) < 1e-5:
+            # todo: fix x value to 1 here (if close already)?
             return 0.5 * (start_point + end_point)
-        # else, return the point with the largest x-coordinate
+        # else, return the point with the largest x-coordinate, assuming upper
+        # and lower surface converge in that point
         else:
-            return start_point if start_point[0] > end_point[0] else end_point
+            raise ValueError("Trailing edge not properly defined, possible unaccounted edge case")
+            # return start_point if start_point[0] > end_point[0] else end_point
 
     @staticmethod
     def get_leading_edge(
@@ -127,6 +181,13 @@ class AirfoilProcessor:
         return preliminary_spline.evaluate_at(result.x[0])
 
     @staticmethod
+    def chord_vector(
+        leading_edge: np.ndarray, trailing_edge: np.ndarray
+    ) -> np.ndarray:
+        """Calculates the chord vector from the leading to trailing edge."""
+        return trailing_edge - leading_edge
+
+    @staticmethod
     def calculate_scale(
         leading_edge: np.ndarray, trailing_edge: np.ndarray
     ) -> float:
@@ -138,6 +199,11 @@ class AirfoilProcessor:
     def calculate_translation(leading_edge: np.ndarray) -> np.ndarray:
         """Calculates the translation vector to move the leading edge to the origin."""
         return -leading_edge
+
+    @staticmethod
+    def calculate_rotation_angle(chord_vector: np.ndarray) -> float:
+        """Calculates the rotation angle to align the chord line with the x-axis."""
+        return -np.arctan2(chord_vector[1], chord_vector[0])
 
     @staticmethod
     def calculate_rotation_matrix(
@@ -154,7 +220,7 @@ class AirfoilProcessor:
         )
 
     @staticmethod
-    def normalize(
+    def transformation(
         points: np.ndarray) -> np.ndarray:
         """Normalizes points by applying translation, scaling, and rotation."""
         preliminary_spline = AirfoilProcessor.fit_preliminary_spline(points)
@@ -168,7 +234,58 @@ class AirfoilProcessor:
         rotation_matrix = AirfoilProcessor.calculate_rotation_matrix(
             leading_edge, trailing_edge
         )
+        return (scale, translation, rotation_matrix)
 
-        # Apply translation, scaling, and rotation
+    @staticmethod
+    def normalize(points: np.ndarray) -> np.ndarray:
+        """Normalizes points by applying translation, scaling, and rotation."""
+        scale, translation, rotation_matrix = AirfoilProcessor.transformation(points)
         normalized_points = (points + translation) * scale
-        return (rotation_matrix @ normalized_points.T).T
+        # return (rotation_matrix @ normalized_points.T).T.view(Point2D)
+        # # ! trying something else:
+        normalized_points = (rotation_matrix @ normalized_points.T).T
+        normalized_points = normalized_points.view(TransformedPoints)
+        normalized_points._scale = scale
+        normalized_points._translation = translation
+        normalized_points._rotation_matrix = rotation_matrix
+        normalized_points._rotation = np.arctan2(rotation_matrix[1, 0], rotation_matrix[0, 0])
+        return normalized_points
+
+
+class TransformedPoints(Point2D):
+    """Defines an array with normalized coordinates in 2D space.
+    Probably not needed, but never know when one might need to check the
+    transformation values used during normalization.
+    """
+
+    def __new__(cls, array: Tuple[float, float] | np.ndarray):
+        """Creates a :py:class:`NormalizedCoordinates` instance from ``array``."""
+        obj = AirfoilProcessor.normalize(array).view(cls)
+        obj._scale, obj._translation, obj._rotation_matrix = AirfoilProcessor.transformation(array)
+        obj._rotation = np.arctan2(obj._rotation_matrix[1, 0], obj._rotation_matrix[0, 0])
+        return obj
+
+    @property
+    def scale(self):
+        """Returns the scaling factor which was applied."""
+        return self._scale
+
+    @property
+    def translation(self):
+        """Returns the applied translation vector."""
+        return self._translation
+
+    @property
+    def rotation(self) -> float:
+        """Returns the applied rotation angle in radians."""
+        return self._rotation
+
+    @property
+    def rotation_matrix(self) -> float:
+        """Returns the rotation angle in radians."""
+        return self._rotation_matrix
+
+    @property
+    def transformation(self) -> Tuple[float, np.ndarray, float]:
+        """Returns the transformation values used for normalization."""
+        return (self._scale, self._translation, self._rotation)

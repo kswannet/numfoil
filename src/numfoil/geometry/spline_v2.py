@@ -24,6 +24,8 @@ class Curve(ABC):
     @cached_property
     def points(self) -> np.ndarray:
         """Retrieve the (input) points used to define the curve."""
+        # ! this definition is not fixed yet, in previous versions `points`
+        # ! meant the resampled points of the curve, not the oringal input points
         raise NotImplementedError
 
     def evaluate_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
@@ -296,6 +298,9 @@ class SplevCBezier(BSpline2D):
     composite Bezier (CBezier) curve, clamped at the endpoints and the leading
     edge.
 
+    Refs:
+        https://math.stackexchange.com/questions/2960974/convert-continuous-bezier-curve-to-b-spline
+
     Use fit method to fit the curve to a set of airfoil coordinate points in
     selig format.
     """
@@ -386,34 +391,51 @@ class SplevCBezier(BSpline2D):
     def fit(
         cls,
         points: np.ndarray,
-        n_control_points: int = 6,
+        n_control_points: int = 12,
         spacing: Union[str, np.ndarray] = "cosine",
-        method: str = "least_squares",
+        method: str = "kdtree",
         endpoint_clamping = False,
         beta = 0,
+        return_results: bool = False,
     ) -> "AirfoilBezier":
         """
         Fit an Bspline-based composite bezier curve through given airfoil
         coordinates.
 
+        Refs:
+        https://math.stackexchange.com/questions/2960974/convert-continuous-bezier-curve-to-b-spline
+
         Args:
-            points (np.ndarray): Input airfoil points of shape (m, 2).
-                Must follow the order: trailing edge -> upper surface -> leading
-                edge -> lower surface -> trailing edge.
-            n_control_points (int): Number of control points per airfoil
-                surface. Total number of control points will be 2*n+1, n for the
-                upper surface, n for the lower surface, and one explicitly in
-                the origin (leading edge).
-            spacing (np.ndarray or str): Predefined x-locations for control
-                points in array (from [0,1], without repeated points), or a
-                string defining the type of spacing used.
-            method (str): Fitting method, either "least_squares" or "L2_norm".
+            points (np.ndarray):
+                Input airfoil points of shape (m, 2). Must follow the order:
+                trailing edge -> upper surface -> leading edge -> lower surface
+                -> trailing edge.
+
+            n_control_points (int):
+                Number of control points per airfoil surface. Total number of
+                control points will be 2*n+1, n for the upper surface, n for the
+                lower surface, and one explicitly in the origin (leading edge).
+
+            spacing (np.ndarray or str):
+                Predefined x-locations for control points in array (from [0,1],
+                without repeated points), or a string defining the type of
+                spacing used.
+                Defaults to "cosine".
+
+            method (str):
+                Fitting method, either "kdtree", "least_squares" or "L2_norm".
+                While other methods are implemented, only "kdtree" seems works
+                properly, so using the others is not recommended.
+                Defaults to "kdtree".
+
+            return_results (bool): If True, return the optimization results.
+            TODO: return_results will be removed at some point.
 
         Returns:
             AirfoilBezier: Fitted airfoil-specific Bézier curve.
         """
         # TODO : remove other methods from ``fit`` method, only kdtree works properly
-        method = "kdtree"  # the other ones dont work properly, but im leaving them in for now
+        # method = "kdtree"  # the other ones dont work properly, but im leaving them in for now
 
         degree = n_control_points - 1
         # input is control points per bezier part (upper and lower surface)
@@ -478,11 +500,13 @@ class SplevCBezier(BSpline2D):
 
         # # alternate fixed initial guesses
         # init_guess = np.concatenate((
-        #     [0.5] * variables_per_side,
-        #     [-0.5] * variables_per_side,
+        #     [0.2] * variables_per_side,
+        #     [-0.2] * variables_per_side,
         # ))
 
-        # Parametric locations of data on curve approximated by arc length
+        # Estimated parametric locations of data on curve approximated by arc
+        # length. !!! THESE ARE NOT ACCURATE ENOUGH TO BE USED FOR L2 NORM
+        # OPTIMIZATION !!!
         u_target = cls.arc_lengths(points, normalize=True)
 
         # TODO : Add knot/clamp locations as input?
@@ -526,8 +550,19 @@ class SplevCBezier(BSpline2D):
             curve_points = cls(tck).evaluate_at(u_target)
             residuals = points - curve_points
 
+            # penalty for oscillations in y values
             smoothness_penalty = beta * np.sum(np.diff(y_values) ** 2)
             # smoothness_penalty = beta * np.sum(np.linalg.norm(np.diff(control_points, axis=0), axis=1) ** 2)
+
+            # overlop penalty to prevent intersection
+            overlap_penalty = 1e2 * np.mean(
+                np.maximum(
+                    0,
+                    - cls(tck).evaluate_at(np.linspace(0, 0.2, 100)).T[1]
+                    + cls(tck).evaluate_at(np.linspace(0.8, 1, 100)).T[1][::-1]
+                )
+            )**2
+
 
             match method:
                 case "least_squares":
@@ -537,30 +572,58 @@ class SplevCBezier(BSpline2D):
                 case "kdtree":
                     curve_points = cls(tck).evaluate_at(np.linspace(0, 1, 500))
                     distances, _ = KDTree(curve_points).query(points)
-                    return np.sum(distances)**2 + smoothness_penalty
+                    return np.sum(distances)**2 + smoothness_penalty + overlap_penalty
                 case _:
                     raise ValueError("Invalid method. Use 'least_squares' or 'L2_norm'.")
+
+        constraints = [
+                {
+                    # trailing edge points must have symmetric y values
+                    "type": "eq",
+                    "fun": lambda y: y[0] + y[-1]  # = 0
+                },
+                {
+                    # upper trailing edge point must have y >= 0
+                    "type": "ineq",
+                    "fun": lambda y: y[0]  # >= 0
+                }
+            ]
 
         # Perform optimization
         match method:
             case "least_squares":
                 results = opt.least_squares(objective, init_guess, verbose=2)
             case "L2_norm" | "kdtree":
-                results = opt.minimize(objective, init_guess)
+                results = opt.minimize(
+                    objective, init_guess,
+                    constraints=constraints,
+                    options={
+                        # "method": "L-BFGS-B",
+                        "disp": True,
+                        # "ftol": 1e-9,
+                        },
+                    tol=1e-6
+                )
             case _:
                 raise ValueError(f"Invalid method {method}. Use 'least_squares' or 'L2_norm'.")
 
+        if not results.success:
+            raise ValueError(f"Curve fit failed: {results.message}")
         # Generate final control points
         y_optimized = results.x
         control_points = combine_x_y(y_optimized)
 
         tck = (knot_vector, control_points.T, degree)
 
-        return cls(tck, points)
+        return (cls(tck, points), results) if return_results else cls(tck, points)
 
 
 class Bezier(Curve):
-    """Represents a Bezier curve using control points."""
+    """Represents a Bezier curve using control points.
+
+    Refs:
+        https://www.youtube.com/watch?v=jvPPXbo87ds
+    """
 
     def __init__(
         self,
@@ -611,7 +674,7 @@ class Bezier(Curve):
         This has no real purpose for this Bezier class definition, but could be
         useful for interfacing with other code that expects a spline.
 
-        Bspline knots are defined as the parameter boundary points, with
+        Bspline knots are defined as the parameter boundary points (0,1), with
         multiplicity (degree + 1) to clamp the endpoints.
 
         Returns:
@@ -640,10 +703,17 @@ class Bezier(Curve):
                 np.ndarray: Knot vector of the spline.
         """
         # return self.spline[0]
-        print("Knots are not defined for a Bézier curve. "
+        message = (
+            "Knots are not defined for a Bézier curve. "
             + "For a Bspline defintion of the bezier curve,"
             + " call the spline property."
         )
+        # print(message)
+        # this is messy but draws more attention (maybe?)
+        try:
+            raise(NotImplementedError(message))
+        except NotImplementedError as e:
+            print(repr(e))
 
     @cached_property
     def coefficient_matrix(self) -> np.ndarray:
@@ -725,6 +795,7 @@ class Bezier(Curve):
         endpoint_clamping: bool = True,
         method: str = "least_squares",
         beta: float = 0,
+        return_results: bool = False,
     ) -> "Bezier":
         """Fit be the Bézier curve to the given points.
 
@@ -748,6 +819,10 @@ class Bezier(Curve):
             beta (float, optional):
                 regularization weight parameter for control point location.
                 Defaults to 0.
+
+            return_results (bool, optional):
+                whether to return the optimization results.
+                Defaults to False.
 
         Raises:
             ValueError:
@@ -847,7 +922,7 @@ class Bezier(Curve):
         control_points = results.x.reshape(-1, 2)
         if endpoint_clamping:
             control_points = np.vstack((points[0], control_points, points[-1]))
-        return cls(control_points, points)
+        return (cls(control_points, points), results) if return_results else cls(control_points, points)
 
 
 

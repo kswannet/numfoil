@@ -35,7 +35,6 @@ class AirfoilBase(metaclass=ABCMeta):
         Args:
             x: Chord-line fraction (0 = LE, 1 = TE)
         """
-        raise NotImplementedError
 
     @abstractmethod
     def upper_surface_at(
@@ -74,14 +73,15 @@ class Airfoil:
         name: str = None,
         full_name: str = None,
     ):
-        # these are the original input points, mainly for reference
+        # the original input points, mainly for reference
         self.data_points = data_points
-        # these are the data points after processing, used for fitting
-        self.normalized_points = normalized_points
+        # the data points after processing, used for fitting
+        self.normalized_points = normalized_points or AirfoilProcessor.normalize(data_points)
+
         # the shortened name of the airfoil, usually the filename
         self.name = name
         # the full name of the airfoil, usually from the file header
-        self.full_name = full_name
+        self.full_name = full_name or name
 
     @classmethod
     def from_array(cls, points: np.ndarray, name: str = None):
@@ -102,7 +102,12 @@ class Airfoil:
             raise TypeError("Input must be a numpy array.")
         if points.shape[1] != 2:
             raise ValueError("Input array must have shape (n, 2).")
-        return cls(points, name=name)
+        # normalized_points = AirfoilProcessor.normalize(points)
+        return cls(
+            data_points=points,
+            # normalized_points=normalized_points,
+            name=name
+        )
 
     @classmethod
     def from_file(cls, filepath: str):
@@ -130,11 +135,12 @@ class Airfoil:
         filename = AirfoilDataFile.filename(filepath)
         points = np.genfromtxt(filepath, skip_header=1)
 
-        normalized_points = AirfoilProcessor.normalize(points)
+        # normalization call moved to __init__
+        # normalized_points = AirfoilProcessor.normalize(points)
 
         return cls(
             data_points=points,
-            normalized_points=normalized_points,
+            # normalized_points=normalized_points,
             name=filename,
             full_name=header
         )
@@ -146,7 +152,9 @@ class Airfoil:
 
     @cached_property
     def trailing_edge(self) -> np.ndarray:
-        """Calculates the trailing edge point."""
+        """Calculates the trailing edge point.
+        
+        """
         start_point = self.surface.evaluate_at(0)
         end_point = self.surface.evaluate_at(1)
         # if endpoints are both at same x-coordinate, return midpoint
@@ -160,32 +168,57 @@ class Airfoil:
     @cached_property
     def leading_edge(self) -> np.ndarray:
         """Determines the leading edge as the point on the spline furthest from the trailing edge."""
-        trailing_edge = self.trailing_edge
         u_leading_edge = opt.minimize(
             lambda u: -np.linalg.norm(
-                self.preliminary_spline(u) - trailing_edge
+                self.surface.evaluate_at(u[0]) - self.trailing_edge
             ),
             0.5,
             bounds=[(0, 1)],
         ).x[0]
-        return self.preliminary_spline(u_leading_edge)
+        return self.surface.evaluate_at(u_leading_edge)
+        # return AirfoilProcessor.get_leading_edge(
+        #     self.surface,
+        #     self.trailing_edge
+        # )
 
     @cached_property
     def upper_surface_at(self) -> si.PchipInterpolator:
-        """Interpolator for the upper surface of the airfoil."""
-        upper_points = self.points[
-            self.points[:, 0] <= 0.5
-        ]
-        x, y = upper_points.T
+        """Interpolator for upper surface spline.
+        Returns upper airfoil ordinates at the supplied ``x``.
+
+        Args:
+            x (float, np.ndarray): Chord-line fraction (0 = LE, 1 = TE)
+
+        Returns:
+            interpolator results: upper surface y ordinate at x.
+        """
+        # ! For some reason interpolator doesn't always go as far as 1, probably
+        # ! due to rounding, so instead force the inteprolator beyond 1.
+        # ! It's an ugly fix, but I don't have a better one atm.
+        u = cosine_spacing(0, 1.001, num=200)
+        points = self.upper_surface.evaluate_at(u).round(5)
+        x, y = points[points[:, 0] == np.maximum.accumulate(points[:, 0])].T
+        assert np.all(np.diff(x) > 0)
         return si.PchipInterpolator(x, y, extrapolate=False)
 
     @cached_property
     def lower_surface_at(self) -> si.PchipInterpolator:
-        """Interpolator for the lower surface of the airfoil."""
-        lower_points = self.points[
-            self.points[:, 0] >= 0.5
-        ]
-        x, y = lower_points.T
+        """Interpolator for lower surface spline.
+        Returns lower airfoil ordinates at the supplied ``x``.
+
+        Args:
+            x (float, np.ndarray): Chord-line fraction (0 = LE, 1 = TE)
+
+        Returns:
+            interpolator results: lower surface y ordinate at x.
+        """
+        # ! For some reason interpolator doesn't always go as far as 1, probably
+        # ! due to rounding, so instead force the inteprolator beyond 1.
+        # ! It's an ugly fix, but I don't have a better one atm.
+        u = cosine_spacing(0, 1.001, num=200)
+        points = self.lower_surface.evaluate_at(u).round(5)
+        x, y = points[points[:, 0] == np.maximum.accumulate(points[:, 0])].T
+        assert np.all(np.diff(x) > 0)
         return si.PchipInterpolator(x, y, extrapolate=False)
 
     @cached_property
