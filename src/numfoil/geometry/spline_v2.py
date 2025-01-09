@@ -58,6 +58,28 @@ class Curve(ABC):
         denominator = (dx**2 + dy**2) ** 1.5  # abs([dx, dy])^3
         return np.where(denominator != 0, numerator / denominator, 0)
 
+    @property
+    def max_curvature(self) -> Tuple[float, float]:
+        """Finds maximum curvature of the curve.
+
+        Returns:
+            Tuple: tuple of the location and value of the maximum curvature:
+                [0]: float: parametric location ``u`` of max curvature.
+                [1]: float: maximum curvature value \kappa_{max}.
+
+        """
+        result = opt.minimize(
+            lambda u: -self.curvature_at(u[0]) ** 2,
+            0.51,
+            bounds=[(0.0, 1)],
+            method="SLSQP",
+        )
+        if not result.success:
+            print("Failed to find max curvature!")
+        return result.x[0], (
+            np.sqrt(-result.fun) if result.success else float("nan")
+        )
+
     def radius_at(self, x: Union[float, np.ndarray]) -> np.ndarray:
         """Return the radius of curvature on the curve at given location ``u``."""
         curvature = self.curvature_at(x)
@@ -85,7 +107,6 @@ class Curve(ABC):
             if normalize
             else cumulative_lengths
         )
-
 
 class ParametricCurve(Curve, ABC):
     """More specific curve baseclass for parametric curves."""
@@ -270,29 +291,9 @@ class BSpline2D(ParametricCurve):
         """
         return np.array(si.splev(u, self.spline, der=2), dtype=np.float64).T
 
-    @property
-    def max_curvature(self) -> Tuple[float, float]:
-        """Finds maximum curvature of the curve.
-
-        Returns:
-            Tuple: tuple of the location and value of the maximum curvature:
-                [0]: float: parametric location ``u`` of max curvature.
-                [1]: float: maximum curvature value \kappa_{max}.
-
-        """
-        result = opt.minimize(
-            lambda u: -self.curvature_at(u[0]) ** 2,
-            0.51,
-            bounds=[(0.0, 1)],
-            method="SLSQP",
-        )
-        if not result.success:
-            print("Failed to find max curvature!")
-        return result.x[0], (
-            np.sqrt(-result.fun) if result.success else float("nan")
-        )
 
 
+# TODO make this class more general, and try to keep airfoil specific stuff in a subclass
 class SplevCBezier(BSpline2D):
     """Represents a B-spline curve (defined by tck tuple), which mimics a
     composite Bezier (CBezier) curve, clamped at the endpoints and the leading
@@ -946,7 +947,6 @@ class Bezier(Curve):
 
 
 
-
 class AirfoilBezier(Bezier):
     """Bezier curve subclass tailored for airfoil geometry."""
 
@@ -1077,3 +1077,10 @@ class AirfoilBezier(Bezier):
 
         return cls(control_points, points)
 
+
+# class AirfoilSurface(ParametricCurve):
+#     def __init__(self, curve: ParametricCurve):
+#         self.curve = curve
+
+#     def evaluate_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
+#         return self.curve.evaluate_at(u)
