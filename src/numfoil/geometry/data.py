@@ -244,7 +244,7 @@ class AirfoilProcessor:
         # return (rotation_matrix @ normalized_points.T).T.view(Point2D)
         # # ! trying something else:
         normalized_points = (rotation_matrix @ normalized_points.T).T
-        normalized_points = normalized_points.view(TransformedPoints)
+        normalized_points = normalized_points.view(NormalizedAirfoilCoordinates)
         normalized_points._scale = scale
         normalized_points._translation = translation
         normalized_points._rotation_matrix = rotation_matrix
@@ -252,12 +252,13 @@ class AirfoilProcessor:
         return normalized_points
 
 
-class TransformedPoints(Point2D):
+class NormalizedAirfoilCoordinates(Point2D):
     """Defines an array with normalized coordinates in 2D space.
     Probably not needed, but never know when one might need to check the
     transformation values used during normalization.
-    """
 
+    TODO: makes this a more general?
+    """
     def __new__(cls, array: Tuple[float, float] | np.ndarray):
         """Creates a :py:class:`NormalizedCoordinates` instance from ``array``."""
         obj = AirfoilProcessor.normalize(array).view(cls)
