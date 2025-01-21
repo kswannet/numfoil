@@ -104,31 +104,29 @@ class AirfoilProcessor:
         return BSpline2D(points)
 
     @staticmethod
-    def get_trailing_edge(preliminary_spline: BSpline2D) -> np.ndarray:
+    def get_trailing_edge(surface_spline: BSpline2D) -> np.ndarray:
         """Calculates the trailing edge point."""
-        start_point = preliminary_spline.evaluate_at(0)
-        end_point = preliminary_spline.evaluate_at(1)
+        start_point = surface_spline.evaluate_at(0)
+        end_point = surface_spline.evaluate_at(1)
 
-        # ! OF COURSE THERES ANOTHER FUCKING EDGECASE BECAUSE THE DATA IS FUCKED
-        # ! AND THE TRIALING EDGE ISNT PROPERLY DEFINED EBCAUSE WHY THE FUCK WOULD
-        # ! IT BE?????
-        res1 = opt.minimize(lambda u: -np.linalg.norm(np.array([0,0])-preliminary_spline.evaluate_at(u)[0]), 0, bounds=[(0, 1)])
-        res2 = opt.minimize(lambda u: -np.linalg.norm(np.array([0,0])-preliminary_spline.evaluate_at(u)[0]), 1, bounds=[(0, 1)])
+        res1 = opt.minimize(lambda u: -np.linalg.norm(np.array([0,0])-surface_spline.evaluate_at(u)[0]), 0, bounds=[(0, 1)])
+        res2 = opt.minimize(lambda u: -np.linalg.norm(np.array([0,0])-surface_spline.evaluate_at(u)[0]), 1, bounds=[(0, 1)])
         # if the maximum x value found is not the same at both ends of the
         # spline, the trailing edge is not properly defined and doubles back on
         # itself or the coordinates are missing one of the endpoints
+        # ! this is still not ideal. If a trailing edge point is missing somehow
+        # ! extrapolating might lead to a better result than just taking the
+        # ! maximum x value. This is a quick fix for now.
         if abs(res1.fun - res2.fun) > 1e-5:
             # take location u with maximum x value, most likely to be trailing edge
             u_TE = res1.x[0] if -res1.fun>-res2.fun else res2.x[0]
-            return preliminary_spline.evaluate_at(u_TE)
+            return surface_spline.evaluate_at(u_TE)
 
 
         # if endpoints are both at same x-coordinate, return midpoint
         elif abs(start_point[0] - end_point[0]) < 1e-5:
             # todo: fix x value to 1 here (if close already)?
             return 0.5 * (start_point + end_point)
-        # else, return the point with the largest x-coordinate, assuming upper
-        # and lower surface converge in that point
         else:
             raise ValueError("Trailing edge not properly defined, possible unaccounted edge case")
             # return start_point if start_point[0] > end_point[0] else end_point

@@ -11,6 +11,7 @@ from abc import ABCMeta, abstractmethod
 from .data import AirfoilProcessor, AirfoilDataFile
 from ..util import cosine_spacing, chebyshev_nodes, ensure_1d_vector
 from .spline_v2 import BSpline2D, SplevCBezier, ParametricCurve
+from .geom2d import Point2D
 
 
 class AirfoilBase(metaclass=ABCMeta):
@@ -62,7 +63,7 @@ class AirfoilBase(metaclass=ABCMeta):
         raise NotImplementedError
 
 
-class Airfoil:
+class Airfoil(AirfoilBase):
     """Unified airfoil class handling points-based airfoils with inconsistent or
     missing data."""
 
@@ -132,9 +133,9 @@ class Airfoil:
             points = AirfoilDataFile.load_from_file(filepath, header=0)
 
         filename = AirfoilDataFile.filename(filepath)
-        points = np.genfromtxt(filepath, skip_header=1)
+        points = np.genfromtxt(filepath, skip_header=1).view(Point2D)
 
-        # normalization call moved to __init__
+        # ! normalization call moved to __init__ (for now)
         # normalized_points = AirfoilProcessor.normalize(points)
 
         return cls(
@@ -151,65 +152,26 @@ class Airfoil:
 
     @cached_property
     def trailing_edge(self) -> np.ndarray:
-        """Calculates the trailing edge point.
+        """Returns the [x,y] coordinate of the trailing edge.
 
+        Trailing edge is taken as the midpoint between surface spline ends.
+
+        Returns:
+            np.ndarray: The [x,y] coordinate of the trailing edge.
         """
-        start_point = self.surface.evaluate_at(0)
-        end_point = self.surface.evaluate_at(1)
-        # # if endpoints are both at same x-coordinate, return midpoint
-        # if abs(start_point[0] - end_point[0]) < 1e-4:
-        #     return 0.5 * (start_point + end_point)
-        # # else, return the point with the largest x-coordinate
-        # else:
-        #     return start_point if start_point[0] > end_point[0] else end_point
-
-        # this should be a more robust way, if more complicated
-        res1 = opt.minimize(lambda u: -np.linalg.norm(np.array([0,0])-self.surface.evaluate_at(u)[0]), 0, bounds=[(0, 1)])
-        res2 = opt.minimize(lambda u: -np.linalg.norm(np.array([0,0])-self.surface.evaluate_at(u)[0]), 1, bounds=[(0, 1)])
-
-        # if the maximum x value found is not the same at both ends of the
-        # spline, the trailing edge is not properly defined and doubles back on
-        # itself or the coordinates are missing one of the endpoints
-        if abs(res1.fun - res2.fun) > 1e-5:
-            # take location u with maximum x value, most likely to be trailing edge
-            u_TE = res1.x[0] if -res1.fun>-res2.fun else res2.x[0]
-            return self.surface.evaluate_at(u_TE)
-
-        # if endpoints are both at same x-coordinate, return midpoint
-        elif abs(start_point[0] - end_point[0]) < 1e-5:
-            # todo: fix x value to 1 here (if close already)?
-            return 0.5 * (start_point + end_point)
-        else:
-            raise ValueError(
-                "Trailing edge not properly defined, possible edge case?"
-            )
+        return 0.5*(self.surface.evaluate_at(0) + self.surface.evaluate_at(1))
 
 
     @cached_property
     def u_leading_edge(self) -> np.ndarray:
-        """Determines the leading edge as the point on the spline furthest from the trailing edge."""
-        # u_leading_edge = opt.minimize(
-        #     lambda u: -np.linalg.norm(
-        #         self.surface.evaluate_at(u[0]) - self.trailing_edge
-        #     ),
-        #     0.5,
-        #     bounds=[(0, 1)],
-        # ).x[0]
-        # return self.surface.evaluate_at(u_leading_edge)
-        # # return AirfoilProcessor.get_leading_edge(
-        # #     self.surface,
-        # #     self.trailing_edge
-        # # )
-        # initial guess is midway the surface curve/spline
-        init_guess = 0.5
-
-        def objective(u):
-            residuals = self.trailing_edge - self.surface.evaluate_at(u)
-                    return -np.linalg.norm(residuals)
-
+        """Determines the leading edge as the point on the spline furthest from
+        the trailing edge.
+        """
         result = opt.minimize(
-            objective,
-            init_guess,
+            lambda u: -np.linalg.norm(
+                self.trailing_edge - self.surface.evaluate_at(u[0])
+            ),
+            0.5, # initial guess
             bounds=[(0, 1)],
             # method="SLSQP",
             )
@@ -217,7 +179,6 @@ class Airfoil:
         if not result.success:
             print(result)
             raise RuntimeError("Failed to find leading edge.")
-
         return result.x[0]
 
     @cached_property
