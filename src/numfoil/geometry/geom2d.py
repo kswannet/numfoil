@@ -63,21 +63,19 @@ class Point2D(Geom2D):
         When two :py:class:`Point2D` objects are subtracted from
         one another a vector is created as follows::
 
-            a = Point2D([0, 0])
-            b = Point2D([1, 1])
-
-            b - a
+            >>> a = Point2D([0, 0])
+            >>> b = Point2D([1, 1])
+            >>> b - a
             Vector2D([1, 1])  # A Vector2D object is created from a to b
 
-            a - b
+            >>> a - b
             Vector2D([-1, -1])  # A Vector2D from b to a
 
         However, if a simple scalar is added to the :py:class:`Point2D`
         object it will return a `Point2D` object as expected::
 
-            a = Point2D([0, 0])
-            a + 2
-
+            >>> a = Point2D([0, 0])
+            >>> a + 2
             Point2D([2, 2])
         """
         if isinstance(other, Point2D):
