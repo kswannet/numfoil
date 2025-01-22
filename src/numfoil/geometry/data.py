@@ -1,3 +1,4 @@
+from functools import cached_property
 import numpy as np
 from typing import Tuple
 import scipy.interpolate as si
@@ -7,86 +8,101 @@ from .geom2d import Point2D, Geom2D
 import os
 
 class AirfoilDataFile:
-    """Handles loading airfoil data from files or arrays."""
+    """
+    Class that loads airfoil coordinate data and any header lines from a file.
 
-    @staticmethod
-    def has_header(filepath: str) -> bool:
-        """
-        Determine if a file has a header by inspecting the first line.
+    This version handles the possibility of multiple header lines, stopping only
+    once it encounters the first valid coordinate line.
+    """
+    def __init__(self, filepath: str):
+        self.filepath = filepath
 
-        Args:
-            filepath (str): Path to the file.
+    @cached_property
+    def filename(self) -> str:
+        """Returns the name of the airfoil from filename."""
+        return os.path.splitext(os.path.basename(self.filepath))[0]
 
-        Returns:
-            bool: True if the file has a header, False otherwise.
-        """
-        with open(filepath, 'r', encoding='utf-8') as file:
-            first_line = file.readline().strip()
+    @cached_property
+    def _content(self) -> list[str]:
+        """Returns the content of the file as a list of lines."""
+        with open(self.filepath, 'r', encoding='utf-8') as f:
+            return f.readlines()
 
-        # Check if the first line contains non-numeric content
-        try:
-            # Attempt to convert each word in the first line to a float
-            _ = [float(value) for value in first_line.split()]
-            return False  # If successful, it's numeric, so no header
-        except ValueError:
-            return True  # If conversion fails, it's likely a header
+    def __repr__(self):
+        return f"AirfoilDataFile('{self.filename}')"
 
-    @staticmethod
-    def count_header_lines(filepath: str) -> int:
-        """
-        Count the number of header lines before the coordinate data starts.
+    def __str__(self):
+        return str(" ".join(self._content))
 
-        Args:
-            filepath (str): Path to the input file.
+    @cached_property
+    def num_header_lines(self) -> int:
+        """The number of header lines found.
 
         Returns:
             int: The number of header lines.
         """
-        def is_valid_coordinates_line(line: str) -> bool:
-            try:
-                # Try to parse the line as numeric data
-                array = np.array([float(value) for value in line.split()])
-                # Ensure it has either 2 elements (a single coordinate) or
-                # matches one of the valid shapes [2, n] or [n, 2] when multiple lines are stacked.
-                return len(array) == 2
-            except ValueError:
-                return False
+        count = 0
+        for line in self._content:
+            if line.strip() and self._is_valid_coordinate(line.strip()):
+                # Found the first valid coordinate => stop counting
+                break
+            count += 1
+        return count
 
-        header_count = 0
-        with open(filepath, 'r', encoding='utf-8') as file:
-            for line in file:
-                line = line.strip()
-                if not line or line.startswith(("#", "//")) or not is_valid_coordinates_line(line):
-                    # Increment header count for empty lines, comments, or invalid coordinate lines
-                    header_count += 1
-                else:
-                    # Stop counting once valid data is found
-                    break
+    @property
+    def header(self) -> str:
+        """Returns file header.
 
-        return header_count
+        Returns:
+            str | None: The header lines as a single multi‐line string.
+        """
+        if self.num_header_lines == 0:
+            return None
+        return "\n".join([
+                line.strip()
+                for line in self._content[:self.num_header_lines]
+        ])
 
-    @staticmethod
-    def load_from_file(filepath: str, header: int) -> np.ndarray:
+    @cached_property
+    def points(self) -> np.ndarray:
         """Loads airfoil points from a file."""
+        coord_lines = self._content[self.num_header_lines:]
+        if not coord_lines:
+            return None
         try:
-            return np.genfromtxt(filepath, skip_header=header)
+            return np.genfromtxt(coord_lines, comments=None).view(Point2D)
         except Exception as e:
-            raise ValueError(f"Failed to load file: {e}") from e
+            raise ValueError(
+                f"Failed to parse coordinates in {self.filepath}: {e}"
+            ) from e
 
     @staticmethod
-    def header(filepath: str) -> str:
-        """Returns the name of the airfoil from header line."""
-        with open(filepath, 'r', encoding='utf-8') as file:
-            first_line = file.readline().strip()
-        return first_line
+    def _is_valid_coordinate(line: str) -> bool:
+        """Check if a line contains valid coordinate data.
 
-    @staticmethod
-    def filename(filepath) -> str:
-        """Returns the name of the airfoil from filename."""
-        return os.path.splitext(os.path.basename(filepath))[0]
+        Logic:
+            If the line can be converted to a float array, it's valid, but only
+            if it has exactly 2 elements (a single [x,y] coordinate) or matches
+            one of the valid shapes [2, n] or [n, 2] when multiple lines are
+            stacked.
+
+        Args:
+            line (str): A line from the file.
+
+        Returns:
+            bool: True if the line contains valid coordinate data,
+                False otherwise.
+        """
+        try:
+            array = np.array([float(value) for value in line.split()])
+            return len(array) == 2
+        except ValueError:
+            return False
+
+
 
 # TODO: I feel like this could be merged with the airfoil class, but I have yet
-# TODO: to see the light on how to do this in a nice way.
+# TODO| to see the light on how to do this in a nice way.
 class AirfoilProcessor:
     """Processes raw airfoil points for alignment and normalization."""
 
@@ -248,6 +264,13 @@ class AirfoilProcessor:
         normalized_points._rotation_matrix = rotation_matrix
         normalized_points._rotation = np.arctan2(rotation_matrix[1, 0], rotation_matrix[0, 0])
         return normalized_points
+
+
+# class AirfoilData(Point2D):
+#     """Defines an array with airfoil coordinates in 2D space."""
+#     def __new__(cls, array: np.ndarray):
+#         """Creates a :py:class:`AirfoilCoordinates` instance from ``array``."""
+#         return array.view(cls)
 
 
 class NormalizedAirfoilCoordinates(Point2D):
