@@ -1,13 +1,15 @@
-import numpy as np
 from typing import Optional, Tuple, Union
 from abc import ABC, abstractmethod
 from functools import cached_property
+
+import numpy as np
 import scipy.optimize as opt
 import scipy.interpolate as si
 from scipy.spatial import KDTree
+from scipy.special import comb
 from warnings import warn as warning
 
-from .geom2d import normalize_2d, rotate_2d_90ccw, Point2D
+from .geom2d import normalize_2d, rotate_2d_90ccw, Point2D, Geom2D
 from ..util import cosine_spacing, chebyshev_nodes, ensure_1d_vector
 # from .data import NormalizedAirfoilCoordinates
 
@@ -968,8 +970,8 @@ class AirfoilSurfaceCBBS(SplevCBezier):
             overlap_penalty = w_overlap * np.sum(
                 np.maximum(
                     0,
-                    - cls(tck).evaluate_at(np.linspace(0, 0.2, 100)).T[1]
-                    + cls(tck).evaluate_at(np.linspace(0.8, 1, 100)).T[1][::-1]
+                    - cls(tck).evaluate_at(np.linspace(0, 0.2, 200)).T[1]
+                    + cls(tck).evaluate_at(np.linspace(0.8, 1, 200)).T[1][::-1]
                 )
             ) ** 2
 
@@ -1156,9 +1158,279 @@ class AirfoilBezier(Bezier):
         return cls(control_points, points)
 
 
-# class AirfoilSurface(ParametricCurve):
-#     def __init__(self, curve: ParametricCurve):
-#         self.curve = curve
 
-#     def evaluate_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
-#         return self.curve.evaluate_at(u)
+
+class CSTCurve:
+    """
+    A class representing a single-valued CST curve: y(x).
+
+    The standard CST formulation for y(x) can be written as:
+        :math:`y(x) = C(x) * S(x)`
+    where
+        :math:`C(x) = x^n1 (1 - x)^n2`
+        :math:`S(x) = \sum_{k=0}^n \binom{n}{k} a_k x^k (1 - x)^{n-k}`
+
+    Args:
+        coefficients (list or array of floats):
+            The shape (Bernstein polynomial) coefficients a_k.
+
+        n1, n2 (float):
+            The exponents in the C(x) term.
+            Default values are n1 = 0.5, n2 = 1.0
+
+        verbose (bool):
+            Print optimization results.
+            Default is False.
+
+    Attributes:
+        n (int): Number of Bernstein terms.
+        k_vec (np.ndarray): Index vector for Bernstein polynomials.
+        binomial_weights (list): List of binomial coefficients.
+    """
+    def __init__(self, coefficients: np.ndarray, n1: float = 0.5, n2: float = 1.0):
+        self.n1 = n1
+        self.n2 = n2
+        self.coefficients = np.array(coefficients, dtype=float)
+
+        # Polynomial degree (number of Bernstein terms)
+        self.n = len(coefficients) - 1
+        # index vector for Bernstein polynomials
+        self.k_vec = np.arange(self.n + 1)
+
+    def class_function(self, x: np.ndarray) -> np.ndarray:
+        """Class function for CST curve.
+        C(x) = x^n1 (1-x)^n2
+
+        :math:`C(x) = x^{n1} (1-x)^{n2}`
+
+        Args:
+            x (np.ndarray): Input array. shape (N,).
+
+        Returns:
+            np.ndarray: Class function values. shape (N,)
+        """
+        return np.power(x, self.n1) * np.power(1.0 - x, self.n2)
+
+    @cached_property
+    def binomial_weights(self):
+        """Precompute binomial coefficients for faster evaluation.
+
+        :math:`\binom{n}{k}`
+
+        Returns:
+            list: List of binomial coefficients.
+        """
+        return comb(self.n, self.k_vec)
+
+    def bernstein_basis(self, x: np.ndarray) -> np.ndarray:
+        """Calculate the Bernstein polynomial.
+        B(x, n, k) = x^k (1 - x)^(n-k), where k is the current index.
+        vectorized this becomes:
+        B(x) = x^k (1 - x)^(n-k), where k = [0, 1, ..., n] is a vector.
+
+        :math:`B_{n,k}(x) = x^k (1 - x)^{n-k}`
+
+        Args:
+            x (np.ndarray): Input array. Shape (N,).
+
+        Returns:
+            np.ndarray: Bernstein polynomial values.
+                Shape (N, n+1) where column k is B_k(x).
+        """
+        x = np.array(x).reshape(-1, 1) # if np.array(x).ndim == 1 else x
+        return np.power(x, self.k_vec) * np.power(1.0 - x, self.n - self.k_vec)
+
+    def weighted_basis_matrix (self, x: np.ndarray) -> np.ndarray:
+        """Construct the weighted Bernstein Basis matrix.
+
+        :math:`M(x) = C(x) * B(x) * binom_coeffs`
+
+        Args:
+            x (np.ndarray): Input array. Shape (N,).
+
+        Returns:
+            np.ndarray: Bernstein Basis matrix. Shape (N, n+1)
+        """
+        x = np.array(x).reshape(-1, 1) # if np.array(x).ndim == 1 else x
+        return (
+            self.class_function(x)
+            * self.bernstein_basis(x)
+            * self.binomial_weights
+        )
+
+    def shape_function(self, x: np.ndarray) -> np.ndarray:
+        """
+        Shape function for CST curve.
+
+        :math:`S(x) = \sum_{k=0}^n a_k B_{n,k}(x)`
+
+        Args:
+            x (np.ndarray): Input array.
+
+        Returns:
+            np.ndarray: Shape function values.
+        """
+        return np.sum(
+                self.coefficients
+                * self.binomial_weights
+                * self.bernstein_basis(x),
+            axis=-1,
+        )
+
+    # Aliases
+    C = class_function
+    S = shape_function
+    B = bernstein_basis
+    M = weighted_basis_matrix
+
+    def evaluate_at(self, x: np.ndarray | float) -> Point2D:
+        """
+        Evaluate the CST curve at a given x in [0, 1].
+        """
+        if np.any(x < 0) or np.any(x > 1):
+            raise ValueError("x must be in the range [0, 1]")
+
+        y = self.class_function(x) * self.shape_function(x)
+        return np.array([x, y]).T.view(Point2D)
+
+    def __call__(self, x: float | np.ndarray) -> float | np.ndarray:
+        """
+        An alternative evaluation of the CST curve at x in [0, 1].
+
+        :math:`y(x) = M(x) * a`
+        """
+        if np.any(x < 0) or np.any(x > 1):
+            raise ValueError("x must be in the range [0, 1]")
+        return self.M(x) @ self.coefficients
+
+    @classmethod
+    def fit(
+        cls,
+        data: np.ndarray,
+        num_coefficients: int = 6,
+        n1: float = 0.5,
+        n2: float = 1.0,
+        verbose: bool = False,
+    ):
+        """
+        Fit the CST coefficients to the provided 2D data points using direct
+        least-squares when n1 and n2 are fixed.
+
+        Args:
+            data (np.ndarray): 2D data points to fit curve to.
+            num_coefficients (int): Number of Bernstein coefficients.
+                Default is 6.
+            n1 (float): Exponent for C(x) term.
+                Default is 0.5.
+            n2 (float): Exponent for C(x) term.
+                Default is 1.0.
+            verbose (bool): Print fitting diagnostics.
+                Default is False.
+
+        Returns:
+            CSTCurve: A fitted CSTCurve instance.
+        """
+        if not isinstance(data, Geom2D):
+            data = data.view(Point2D)
+
+        x, y = data.x[:, None], data.y
+
+        n = num_coefficients - 1        # Polynomial degree (number of Bernstein terms)
+        k_vec = np.arange(n + 1)        # index vector for Bernstein polynomials
+        binom_coeffs = comb(n, k_vec)   # binomial coefficients
+
+        Cx = np.power(x, n1) * np.power(1.0 - x, n2)            # Class function
+        Bx = np.power(x, k_vec) * np.power(1.0 - x, n - k_vec)  # Bernstein polynomial matrix
+
+        Mx = Cx * Bx * binom_coeffs     # Weighted Bernstein basis matrix
+
+        # Solve for the coefficients using least squares
+        cst, residuals, rank, svals = np.linalg.lstsq(Mx, y, rcond=None)
+
+        if verbose:
+            print(f"Residuals: {residuals}")
+            print(f"Rank of M: {rank}")
+            print(f"Singular values: {svals}")
+
+        return cls(cst, n1=n1, n2=n2)
+
+
+class AirfoilCST:
+    """
+    A parametric CST-based airfoil curve, x(u), y(u), covering upper and lower surfaces.
+
+    Here, we define a parameter u in [0,1] that 'walks' around the airfoil from the trailing edge,
+    around the leading edge, and back to the trailing edge.
+
+    For simplicity, we assume:
+      - 0 <= u <= 0.5 describes the upper surface,
+      - 0.5 <= u <= 1.0 describes the lower surface.
+
+    This is just one of many ways to define a closed parametric curve using CST.
+    """
+    def __init__(
+        self,
+        upper_surface: CSTCurve,
+        lower_surface: CSTCurve,
+    ):
+        """
+        We store two separate single-valued CST curves internally for the upper and lower surfaces.
+        """
+        self.upper = upper_surface
+        self.lower = lower_surface
+
+    @classmethod
+    def fit(cls, data: np.ndarray, num_coefficients: int = 6, n1: float = 0.5, n2: float = 1.0):
+        """
+        Fit the CST coefficients to the provided 2D data points using direct
+        least-squares when n1 and n2 are fixed.
+
+        Args:
+            data (np.ndarray): 2D data points to fit curve to.
+            num_coefficients (int): Number of Bernstein coefficients.
+                Default is 6.
+
+        Returns:
+            AirfoilCST: A fitted AirfoilCST instance.
+        """
+        if not isinstance(data, Geom2D):
+            data = data.view(Point2D)
+
+        upper = CSTCurve.fit(data[:len(data)//2][::-1], num_coefficients, n1, n2)
+        lower = CSTCurve.fit(data[len(data)//2:], num_coefficients, n1, n2)
+
+        return cls(upper, lower)
+
+    def x(self, u):
+        """
+        Example parameter-to-x mapping for airfoil.
+        By default, we can just let x decrease from 1 at the trailing edge (u=0)
+        to 0 at the leading edge (u=0.5), and then increase back to 1 at the trailing edge (u=1).
+        One simple linear mapping is:
+            x = 1.0 - 2*abs(u - 0.5)
+        for u in [0, 1].
+        """
+        return np.abs(1 - 2 * u)
+
+    def evaluate_at(self, u):
+        """
+        Evaluate x(u), y(u) at a parametric point u in [0,1].
+
+        Returns:
+            np.ndarray: [x_val, y_val]
+        """
+        if np.any(u < 0.0) or np.any(u > 1.0):
+            raise ValueError("Parameter u must be in [0,1].")
+
+        x = self.x(u)
+        if np.array(x).ndim == 0:
+            y = self.upper(x) if u <= 0.5 else self.lower(x)
+        else:
+            y = np.zeros_like(x)
+            y[u <= 0.5] = self.upper(x[u <= 0.5])
+            y[u >= 0.5] = self.lower(x[u >= 0.5])
+        return np.array([x, y]).T.view(Point2D)
+
+    def __call__(self, u):
+        return self.evaluate_at(u)
+
