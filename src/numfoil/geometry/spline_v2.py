@@ -110,6 +110,7 @@ class Curve(ABC):
             else cumulative_lengths
         )
 
+
 class ParametricCurve(Curve, ABC):
     """More specific curve baseclass for parametric curves."""
 
@@ -601,7 +602,6 @@ class BSpline2D(ParametricCurve):
         return np.array(si.splev(u, self.spline, der=2), dtype=np.float64).T
 
 
-# class AirfoilSurfaceCBBspline
 class SplevCBezier(BSpline2D):
     """Airfoil Surface `Composite Bezier` B-spline.
     Represents a B-spline curve (defined by tck tuple), which mimics a composite
@@ -704,7 +704,7 @@ class SplevCBezier(BSpline2D):
         return len(self.control_points)
 
 
-class AirfoilSurfaceCBBS(SplevCBezier):
+class SplevCBezierAirfoilSurface(SplevCBezier):
     """Airfoil Surface `Composite Bezier` B-Spline (CBBS).
     Represents a B-spline curve (defined by tck tuple), which mimics a composite
     Bezier (CBezier) curve, clamped at the endpoints (x=1) and the leading
@@ -1027,7 +1027,7 @@ class AirfoilSurfaceCBBS(SplevCBezier):
         return cls((knot_vector, control_points.T, degree), points)
 
 
-class AirfoilBezier(Bezier):
+class BezierAirfoilSurface(Bezier):
     """Bezier curve subclass tailored for airfoil geometry."""
 
     def __init__(
@@ -1158,9 +1158,7 @@ class AirfoilBezier(Bezier):
         return cls(control_points, points)
 
 
-
-
-class CSTCurve:
+class CSTCurve(Curve):
     """
     A class representing a single-valued CST curve: y(x).
 
@@ -1354,8 +1352,126 @@ class CSTCurve:
 
         return cls(cst, n1=n1, n2=n2)
 
+    # Ugly stuff
+    def class_first_deriv(self, x: Union[float, np.ndarray]) -> np.ndarray:
+        """ First derivative of the class function
 
-class AirfoilCST:
+        :math:`\frac{dC(x)}{dx} = n1 x^{n1 - 1} (1 - x)^n2 - n2 x^n1 (1 - x)^{n2 - 1}`
+
+        Args:
+            x (np.ndarray): Input array chordwise location.
+
+        Returns:
+            np.ndarray: First derivative of the class function
+        """
+        return(
+        self.n1 * x**(self.n1 - 1) * (1 - x)**self.n2
+        - self.n2 * x**self.n1 * (1 - x)**(self.n2 - 1)
+    )
+
+    def class_second_deriv(self, x: Union[float, np.ndarray]) -> np.ndarray:
+        """ Second derivative of the class function
+
+        :math:`\frac{d^2C(x)}{dx^2} = n1 (n1 - 1) x^{n1 - 2} (1 - x)^n2 - 2 n1
+        n2 x^{n1 - 1} (1 - x)^{n2 - 1} + n2 (n2 - 1) x^n1 (1 - x)^{n2 - 2}`
+
+        Args:
+            x (np.ndarray): Input array chordwise location.
+
+        Returns:
+            np.ndarray: Second derivative of the class function
+        """
+        return(
+            self.n1 * (self.n1 - 1) * x**(self.n1 - 2) * (1 - x)**self.n2
+            - 2 * self.n1 * self.n2 * x**(self.n1 - 1) * (1 - x)**(self.n2 - 1)
+            + self.n2 * (self.n2 - 1) * x**self.n1 * (1 - x)**(self.n2 - 2)
+        )
+
+    def shape_first_deriv(self, x: Union[float, np.ndarray]) -> np.ndarray:
+        """ First derivative of the shape function
+
+        :math:`\frac{dS(x)}{dx} = \sum_{k=0}^n a_k \binom{n}{k} (k x^{k - 1} (1
+        - x)^{n - k} - (n - k) x^k (1 - x)^{n - k - 1})`
+
+        Args:
+            x (np.ndarray): Input array chordwise location.
+
+        Returns:
+            np.ndarray: First derivative of the shape function
+        """
+        return np.sum(
+            self.coefficients
+            * self.binomial_weights
+            * (
+                self.k_vec
+                * np.power(x, self.k_vec - 1)
+                * np.power(1 - x, self.n - self.k_vec)
+            ),
+            axis=-1,
+        )
+
+    def shape_second_deriv(self, x: Union[float, np.ndarray]) -> np.ndarray:
+        """ Second derivative of the shape function
+
+        :math:`\frac{d^2S(x)}{dx^2} = \sum_{k=0}^n a_k \binom{n}{k} ((k - 1) k
+        x^{k - 2} (1 - x)^{n - k} - 2 (n - k) k x^{k - 1} (1 - x)^{n - k - 1} +
+        (n - k - 1) (n - k) x^k (1 - x)^{n - k - 2})`
+
+        Args:
+            x (np.ndarray): Input array chordwise location.
+
+        Returns:
+            np.ndarray: Second derivative of the shape function.
+        """
+        return np.sum(
+            self.coefficients
+            * self.binomial_weights
+            * self.k_vec * (self.k_vec - 1)
+            * np.power(x, self.k_vec - 2)
+            * np.power(1 - x, self.n - self.k_vec),
+            axis=-1,
+        )
+
+    def first_deriv_at(self, x: Union[float, np.ndarray]) -> np.ndarray:
+        """ First derivative of the CST curve at x.
+        :math:`\frac{dy}{dx} = \frac{dC(x)}{dx} S(x) + C(x) \frac{dS(x)}{dx}`
+
+        Args:
+            x (Union[float, np.ndarray]): chordwise location
+
+        Returns:
+            np.ndarray: First derivative of the CST curve at x.
+        """
+        return (
+            self.class_first_deriv(x) * self.shape_function(x)
+            + self.class_function(x) * self.shape_first_deriv(x)
+        )
+
+    def second_deriv_at(self, x: Union[float, np.ndarray]) -> np.ndarray:
+        """ Second derivative of the CST curve at x.
+
+        :math:`\frac{d^2y}{dx^2} = \frac{d^2C(x)}{dx^2} S(x) + 2 \frac{dC(x)}{dx} \frac{dS(x)}{dx} + C(x) \frac{d^2S(x)}{dx^2}`
+
+        Args:
+            x (Union[float, np.ndarray]): Input array chordwise location.
+
+        Returns:
+            np.ndarray: Second derivative of the CST curve at x.
+        """
+        return (
+            self.class_second_deriv(x) * self.shape_function(x)
+            + 2 * self.class_first_deriv(x) * self.shape_first_deriv(x)
+            + self.class_function(x) * self.shape_second_deriv(x)
+        )
+
+    # Aliases
+    dC = class_first_deriv
+    d2C = class_second_deriv
+    dS = shape_first_deriv
+    d2S = shape_second_deriv
+
+
+class CSTAirfoilSurface:
     """
     A parametric CST-based airfoil curve, x(u), y(u), covering upper and lower surfaces.
 
@@ -1376,8 +1492,8 @@ class AirfoilCST:
         """
         We store two separate single-valued CST curves internally for the upper and lower surfaces.
         """
-        self.upper = upper_surface
-        self.lower = lower_surface
+        self.upper_part = upper_surface
+        self.lower_part = lower_surface
 
     @classmethod
     def fit(cls, data: np.ndarray, num_coefficients: int = 6, n1: float = 0.5, n2: float = 1.0):
@@ -1396,8 +1512,13 @@ class AirfoilCST:
         if not isinstance(data, Geom2D):
             data = data.view(Point2D)
 
-        upper = CSTCurve.fit(data[:len(data)//2][::-1], num_coefficients, n1, n2)
-        lower = CSTCurve.fit(data[len(data)//2:], num_coefficients, n1, n2)
+        # upper = CSTCurve.fit(data[:len(data)//2][::-1], num_coefficients, n1, n2)
+        # lower = CSTCurve.fit(data[len(data)//2:], num_coefficients, n1, n2)
+
+        switch_idx = np.where(np.diff(np.sign(np.diff(data[:, 0]))))[0][0] + 1
+
+        upper = CSTCurve.fit(data[:switch_idx][::-1], num_coefficients, n1, n2)
+        lower = CSTCurve.fit(data[switch_idx:], num_coefficients, n1, n2)
 
         return cls(upper, lower)
 
@@ -1424,11 +1545,11 @@ class AirfoilCST:
 
         x = self.x(u)
         if np.array(x).ndim == 0:
-            y = self.upper(x) if u <= 0.5 else self.lower(x)
+            y = self.upper_part(x) if u <= 0.5 else self.lower_part(x)
         else:
             y = np.zeros_like(x)
-            y[u <= 0.5] = self.upper(x[u <= 0.5])
-            y[u >= 0.5] = self.lower(x[u >= 0.5])
+            y[u <= 0.5] = self.upper_part(x[u <= 0.5])
+            y[u >= 0.5] = self.lower_part(x[u >= 0.5])
         return np.array([x, y]).T.view(Point2D)
 
     def __call__(self, u):
