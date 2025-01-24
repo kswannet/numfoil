@@ -266,13 +266,6 @@ class AirfoilProcessor:
         return normalized_points
 
 
-# class AirfoilData(Point2D):
-#     """Defines an array with airfoil coordinates in 2D space."""
-#     def __new__(cls, array: np.ndarray):
-#         """Creates a :py:class:`AirfoilCoordinates` instance from ``array``."""
-#         return array.view(cls)
-
-
 class NormalizedAirfoilCoordinates(Point2D):
     """Defines an array with normalized coordinates in 2D space.
     Probably not needed, but never know when one might need to check the

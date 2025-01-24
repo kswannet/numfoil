@@ -123,25 +123,14 @@ class Airfoil(AirfoilBase):
         Returns:
             Airfoil: Airfoil object initialized with data from file.
         """
-        if AirfoilDataFile.has_header(filepath):
-            # read the header and points separately
-            header = AirfoilDataFile.header(filepath)
-            points = AirfoilDataFile.load_from_file(filepath, header=1)
-        else:
-            # no header, just read the points
-            header = None
-            points = AirfoilDataFile.load_from_file(filepath, header=0)
+        datafile = AirfoilDataFile(filepath)
 
-        filename = AirfoilDataFile.filename(filepath)
-        points = np.genfromtxt(filepath, skip_header=1).view(Point2D)
-
-        # ! normalization call moved to __init__ (for now)
-        # normalized_points = AirfoilProcessor.normalize(points)
+        # normalized_points = AirfoilProcessor.normalize(datafile.points)
 
         return cls(
-            data_points=points,
-            name=filename,
-            full_name=header
+            data_points=datafile.points,
+            name=datafile.filename,
+            full_name=datafile.header,
         )
 
     # TODO add option for other curve types
@@ -160,7 +149,6 @@ class Airfoil(AirfoilBase):
             np.ndarray: The [x,y] coordinate of the trailing edge.
         """
         return 0.5*(self.surface.evaluate_at(0) + self.surface.evaluate_at(1))
-
 
     @cached_property
     def u_leading_edge(self) -> np.ndarray:
