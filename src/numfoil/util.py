@@ -80,7 +80,7 @@ def split_at_le(
     )
 
 
-def cosine_spacing(start: float, stop: float, num: int) -> np.ndarray:
+def cosine_spacing(start: float, stop: float, num: int, a: float = 1.0) -> np.ndarray:
     """Return cosine-spaced numbers over a specified interval.
     Returns `num` cosine-spaced samples, calculated over the
     interval [`start`, `stop`].
@@ -89,11 +89,18 @@ def cosine_spacing(start: float, stop: float, num: int) -> np.ndarray:
         start (float): the starting value of the sequence.
         stop (float): the end value of the sequence.
         num (int): number of samples to generate. Must be non-negative.
+        a (float): endpoint-concentration parameter. Increases concentration
+                near the endpoints when a>1.Default is 1.0.
 
     Returns:
         ndarray: `num` cosine-spaced samples in interval [`start`, `stop`]
     """
-    return start + (stop - start) * 0.5 * (1 - np.cos(np.linspace(0, np.pi, num=num)))
+    # return start + (stop - start) * 0.5 * (1 - np.cos(np.linspace(0, np.pi, num=num)))
+    return start + (stop - start) * 0.5 * (
+        1
+        - np.sign(0.5 - 0.5 * (1 - np.cos(np.linspace(0, np.pi, num))))
+        * np.abs(2 * 0.5 * (1 - np.cos(np.linspace(0, np.pi, num))) - 1) ** a
+    )
 
 def chebyshev_nodes(start: float, end:float , num: int) -> np.ndarray:
     """Return Chebyshev-Lobatto nodes over a specified interval.

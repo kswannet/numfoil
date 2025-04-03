@@ -1,5 +1,5 @@
-from .airfoil import Airfoil, NACA4Airfoil, UIUCAirfoil
-from .geom2d import (
+from ..geometry.airfoil import Airfoil, NACA4Airfoil
+from ..geometry.geom2d import (
     Point2D,
     Vector2D,
     is_row_vector,
