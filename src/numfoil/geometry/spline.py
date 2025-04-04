@@ -1,4 +1,4 @@
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, List
 from functools import cached_property
 from warnings import warn as warning
 from abc import ABC, abstractmethod
@@ -794,8 +794,22 @@ class SplevCBezier(BSpline2D):
             ValueError: number of knots does not match number of control points.
             ValueError: degree and number of control points do not match.
         """
-        self.tck = tck
+        self.spline = list(tck) if isinstance(tck, tuple) else tck
         self.points = points
+        self._validate_degree_and_knots()
+
+
+    def _validate_degree_and_knots(self):
+        # Get the sorted list of unique knots and calculate the number of segments
+        unique_knots = sorted(set(self.knots))
+        unique_knots, unique_knots_counts = np.unique(self.knots, return_counts=True)
+        n_segments = len(unique_knots) - 1  # n segments if there are n+1 distinct knots
+
+        if type(self.spline) is not list:
+            raise ValueError(
+                f"spline must be a list of (t, c, k) tuples."
+                f"Got {type(self.spline)} instead."
+            )
 
         # Validate monotonicity of knot vector
         if not all(self.knots[i] <= self.knots[i + 1] for i in range(len(self.knots) - 1)):
@@ -807,18 +821,34 @@ class SplevCBezier(BSpline2D):
                 f"Invalid number of knots. {len(self.knots)} provided but {self.n_control_points + self.degree + 1} required"
                 )
 
-        # validate degree
-        if self.tck[2] != self.n_control_points - 1:
-            raise ValueError("Degree and number of control points do not match.")
+        # Validate multiplicity for the first knot (should be degree+1)
+        first_mult = unique_knots_counts[0]
+        if first_mult != self.degree + 1:
+            raise ValueError(f"First knot ({unique_knots[0]}) has multiplicity {first_mult}, "
+                            f"expected {self.degree + 1}.")
 
-    @classmethod
-    def fit(cls):
-        raise NotImplementedError(
-            "404 method not found. Skill issue"
-        )
+        # Validate multiplicity for the last knot (should be degree+1)
+        last_mult = unique_knots_counts[-1]
+        if last_mult != self.degree + 1:
+            raise ValueError(f"Last knot ({unique_knots[-1]}) has multiplicity {last_mult}, "
+                            f"expected {self.degree + 1}.")
+
+        # Validate multiplicity for each interior knot (should be exactly degree)
+        for knot in unique_knots[1:-1]:
+            mult = unique_knots_counts[unique_knots.tolist().index(knot)]
+            if mult != self.degree:
+                raise ValueError(f"Interior knot ({knot}) has multiplicity {mult}, expected {self.degree}.")
+
+        # validate the total length of the knot vector.
+        # For a clamped B-spline with (nd + 1) control points (n segments of degree d) the number
+        # of knots should be: (nd+1) + degree + 1 = d*(n+1) + 2.
+        expected_length = self.degree * (n_segments + 1) + 2
+        if len(self.knots) != expected_length:
+            raise ValueError(f"Knot vector length is {len(self.knots)}, expected {expected_length} "
+                            f"for {n_segments} segments and degree {self.degree}.")
 
     @property
-    def spline(self):
+    def tck(self):
         """
         Retrieve the spline representation (tck tuple).
 
@@ -830,9 +860,9 @@ class SplevCBezier(BSpline2D):
         Returns:
             tuple: A tuple (t, c, k) representing the spline.
         """
-        return self.tck
+        return self.spline
 
-    @cached_property
+    @property
     def knots(self):
         """
         Retrieve the knot vector of the spline.
@@ -843,9 +873,20 @@ class SplevCBezier(BSpline2D):
         Returns:
             list or ndarray: Knot vector of the spline.
         """
-        return self.tck[0]
+        return self.spline[0]
 
-    @cached_property
+    @knots.setter
+    def knots(self, value):
+        """
+        Set the knot vector of the spline.
+
+        Args:
+            value (list or ndarray): New knot vector to set.
+        """
+        self.spline[0] = value
+        self._validate_degree_and_knots()
+
+    @property
     def control_points(self):
         """
         Retrieve the control points of the spline.
@@ -853,9 +894,20 @@ class SplevCBezier(BSpline2D):
         Returns:
             ndarray: An array of control points for the spline.
         """
-        return self.tck[1].T
+        return self.spline[1].T
 
-    @cached_property
+    @control_points.setter
+    def control_points(self, value):
+        """
+        Set the control points of the spline.
+
+        Args:
+            value (ndarray): New control points to set.
+        """
+        self.spline[1] = value.T if value.shape[1] == 2 else value
+        self._validate_degree_and_knots()
+
+    @property
     def degree(self):
         """
         Retrieve the degree of the spline.
@@ -865,9 +917,9 @@ class SplevCBezier(BSpline2D):
         Returns:
             int: The degree of the spline.
         """
-        return self.tck[2]
+        return self.spline[2]
 
-    @cached_property
+    @property
     def n_control_points(self):
         """
         Retrieve the number of control points in the spline.
@@ -878,11 +930,34 @@ class SplevCBezier(BSpline2D):
         return len(self.control_points)
 
     @classmethod
+    def from_control_points(cls, control_points):
+        """
+        Create an instance of the class from control points.
+
+        Args:
+            control_points (np.ndarray): Control points for the spline.
+
+        Returns:
+            SplevCBezier: Instance of the class with the provided control points.
+        """
+        assert control_points.ndim == 2 and control_points.shape[1] == 2, \
+            "Control points must be a 2D array with shape (n, 2)."
+        degree = (len(control_points) - 1) // 2
+        knot_vector = np.hstack(
+            [
+            [0.0] * (degree + 1),
+            [0.5] * (degree),
+            [1.0] * (degree + 1)
+            ]
+        )
+        return cls([knot_vector, control_points.T, degree])
+
+    @classmethod
     def fit(
         cls,
         points: np.ndarray,
         n_control_points: int = 12,
-        spacing: str | np.ndarray = "cosine",
+        spacing: str | np.ndarray = "linear",
         w_damping: float = 1e-3,
         w_overlap: float = 1e3,
         clamp_origin: bool = True,
@@ -1125,7 +1200,7 @@ class SplevCBezier(BSpline2D):
         control_points = combine_x_y(y_optimized)
 
         # return the fitted curve
-        return cls((knot_vector, control_points.T, degree), points)
+        return cls([knot_vector, control_points.T, degree], points)
 
 
 
@@ -1440,269 +1515,6 @@ class CSTCurve(Curve):
     d2C = class_second_deriv
     dS = shape_first_deriv
     d2S = shape_second_deriv
-
-
-# ! Probably bad ideas below
-class SplevCBezierAirfoilSurface(SplevCBezier):
-    """Airfoil Surface `Composite Bezier` B-Spline (CBBS).
-    Represents a B-spline curve (defined by tck tuple), which mimics a composite
-    Bezier (CBezier) curve, clamped at the endpoints (x=1) and the leading
-    edge (x=0, y=0).
-    """
-    def __init__(self, tck, points = None):
-        # super().__init__(tck, points)
-        self.tck = tck
-        self.points = points
-
-    @classmethod
-    def fit(
-        cls,
-        points: np.ndarray,
-        n_control_points: int = 12,
-        spacing: str | np.ndarray = "cosine",
-        w_damping: float = 1e-3,
-        w_overlap: float = 1e3,
-        clamp_origin: bool = True,
-        verbose: bool = False,
-    ) -> BSpline2D:
-        """
-        Fit an Bspline-based composite bezier curve through given airfoil
-        coordinates. (Bspline which mimics a composite Bezier curve)
-
-        knot vector for a composite bezier curve:
-        - endpoints are clamped using multiplicity of (degree + 1)
-        - middle knot (leading edge) is clamped using multiplicity (degree)
-        - knot value is kept at 0.5, so evaluating at u = 0.5 should always
-        return the leading edge
-        - evaluating [0, 0.5[ should return the upper surface,
-        ]0.5, 1] the lower surface
-
-        Refs:
-            https://math.stackexchange.com/questions/2960974/convert-continuous-bezier-curve-to-b-spline
-
-        Args:
-            points (np.ndarray):
-                Input airfoil points of shape (m, 2). Must follow the order:
-                trailing edge -> upper surface -> leading edge -> lower surface
-                -> trailing edge.
-
-            n_control_points (int):
-                Number of control points per airfoil surface. Total number of
-                control points will be 2*n+1, n for the upper surface, n for the
-                lower surface, and one explicitly in the origin (leading edge).
-
-            spacing (np.ndarray or str):
-                Predefined x-locations for control points in array (from [0,1],
-                without repeated points), or a string defining the type of
-                spacing used.
-                Defaults to "cosine".
-
-            w_damping (float):
-                Weight for the damping term in the optimization objective.
-                Defaults to 1e-3.
-
-            w_overlap (float):
-                Weight for the overlap penalty in the optimization objective.
-                Defaults to 1e-3.
-
-            clamp_origin (bool):
-                If True, the leading edge is clamped to the origin.
-                This requires normalized input data
-                Defaults to True.
-
-            return_results (bool): If True, return the optimization results.
-
-        Returns:
-            AirfoilBezier: Fitted airfoil-specific Bézier curve.
-        """
-        # if clamp_origin and not isinstance(points, NormalizedAirfoilCoordinates):
-        #     warning(
-        #         "Clamping the leading edge to the origin requires normalized input data.\n"
-        #         + "If the input data is not an instance of the :py:class:`NormalizedAirfoilCoordinates` this can not be verified"
-        #     )
-
-        # First redefine some of the parameters needed
-        # The degree is per definition:
-        degree = n_control_points - 1
-
-        # input number of ctrl points is control points per bezier part,
-        # so both upper and lower surface have the defined number of ctrl points
-        # Note: this still includes the leading edge point for both surfaces
-        n_control_points_per_side = n_control_points
-
-        # Considering leading edge control point is fixed, not all are optimized
-        variables_per_side = n_control_points_per_side - 1
-
-        # The actual total number of control points for the entire surface is
-        # twice the number of points per side, but remember to remove duplicated
-        # leading edge control point
-        n_control_points = n_control_points * 2 - 1
-
-        # The knot vector for a composite bezier curve.
-        # The knot value (leading edge) is fixed at 0.5
-        knot_vector = np.hstack(
-            [
-            [0.0] * (degree + 1),
-            [0.5] * (degree),
-            [1.0] * (degree + 1)
-            ]
-        )
-
-        # Validate input points
-        if points.ndim != 2 or points.shape[1] != 2:
-            raise ValueError("points must be a 2D array with shape (m, 2).")
-
-        # Check if there are enough points to fit the curve
-        if len(points) < n_control_points:
-            raise ValueError(
-                "Number of input points must be >= (2 * len(n_control_points) + 1)."
-                + f"\n Got {len(points)} points, expected at least {2 * len(n_control_points) + 1} for a curve with {n_control_points}."
-            )
-
-        # Check how spacing is defined, and generate x values accordingly
-        if isinstance(spacing, np.ndarray):
-            x_control_points = spacing
-
-        elif isinstance(spacing, str):
-            # if the curve is not clamped to the origin, control point spacing
-            # must account for the non-normalized input data
-            if not clamp_origin:
-                x_values = points.T[0]
-                x_min = x_values.min()
-                x_max = x_values.max()
-            else:
-                x_min = 0
-                x_max = 1
-            match spacing:
-                case "cosine":
-                    x_control_points = cosine_spacing(x_min, x_max, variables_per_side)
-                case "linear":
-                    x_control_points = np.linspace(x_min, x_max, variables_per_side)
-                case "chebyshev":
-                    x_control_points = chebyshev_nodes(x_min, x_max, variables_per_side )
-
-
-        # initial guesses for y values are taken from data points
-        init_guess = points[
-            # indexing linearly spaced points from the input data
-            np.linspace(
-                0, len(points) - 1,
-                # need 2x the number of variables per side
-                variables_per_side * 2,
-                # indeces must be integers
-                dtype=int
-            # indexing only the y values
-            ),1
-            # double values to move control points outward (arbitrary)
-            ] * 2
-
-        # # alternate fixed initial guesses. While this should be the safer
-        # # approach, it does not always work as well as the sampled guess.
-        # init_guess = np.concatenate((
-        #     [0.2] * variables_per_side,
-        #     [-0.2] * variables_per_side,
-        # ))
-
-        def combine_x_y(y_values):
-            """
-            Combine fixed x-values with optimized y-values into control points.
-            Args:
-                y_values (np.ndarray): Optimized y-values (concatenated upper and lower).
-
-            Returns:
-                np.ndarray: Complete control points, including clamped leading edge.
-            """
-            y_upper, y_lower = np.split(y_values, 2)
-            control_points = np.vstack((
-                np.column_stack((x_control_points[::-1], y_upper)),  # Upper surface
-                [0, 0],                                              # Leading edge (clamped)
-                np.column_stack((x_control_points, y_lower)),        # Lower surface
-            ))
-            return control_points.view(Point2D)
-
-        def objective(y_values: np.ndarray) -> np.ndarray:
-            """Objective function for control point fitting optimization.
-
-            Args:
-                y_values (np.ndarray): y values of control points to be found.
-
-            Returns:
-                np.ndarray: residuals between data points and curve points, or
-                    the L2 norm of residuals depending on the chosen method.
-            """
-            control_points = combine_x_y(y_values)
-
-            # create spline definition
-            tck = (knot_vector, control_points.T, degree)
-
-            # get a dens evaluation of the curve to create a KDTree
-            curve = cls(tck).evaluate_at(np.linspace(0, 1, 5000))
-
-            # query the KDTree to get distances to the input data points
-            distances, _ = KDTree(curve).query(points)
-
-            # Penalize oscillations in y values
-            # smoothness_penalty = w_damping * np.sum(np.diff(y_values) ** 2)
-            # smoothness_penalty = w_damping * np.sum(np.diff(y_values)) ** 2
-            # query the KDTree to get distances of the control points to the curve
-            smoothness_penalty = w_damping * np.sum(KDTree(curve).query(control_points)[0])
-
-            # Penilize corssover / intersection of upper and lower surface
-            overlap_penalty = w_overlap * np.sum(
-                np.maximum(
-                    0,
-                    - cls(tck).evaluate_at(np.linspace(0, 0.2, 2000)).T[1]
-                    + cls(tck).evaluate_at(np.linspace(0.8, 1, 2000)).T[1][::-1]
-                )
-            ) ** 2
-
-            # final objective is the square of the sum of the distances,
-            # plus the smoothness and overlap penalties
-            return np.sum(distances)**2 + smoothness_penalty + overlap_penalty
-
-        # Define constraints for optimization
-        constraints = [
-                {
-                    # Trailing edge points must have symmetric y values
-                    # This helps properly define the trialing edge
-                    "type": "eq",
-                    "fun": lambda y: y[0] + y[-1]  # = 0
-                },
-                {
-                    # Upper trailing edge point must have y >= 0
-                    # Probably redundant, but just to be sure
-                    "type": "ineq",
-                    "fun": lambda y: y[0]  # >= 0
-                }
-            ]
-
-        # Perform optimization
-        results = opt.minimize(
-            objective, init_guess,
-            constraints=constraints,
-            method="SLSQP",
-            options={
-                # "disp": True,
-                # "ftol": 1e-5,
-                "maxiter": 1000,
-                },
-            tol=1e-6
-        )
-
-        # if something groes wrong
-        if not results.success:
-            print(results)
-            raise ValueError(f"Curve fit failed: {results.message}")
-
-        if verbose:
-            print(results)
-
-        # Generate final control points
-        y_optimized = results.x
-        control_points = combine_x_y(y_optimized)
-
-        # return the fitted curve
-        return cls((knot_vector, control_points.T, degree), points)
 
 
 class BezierAirfoilSurface(Bezier):
