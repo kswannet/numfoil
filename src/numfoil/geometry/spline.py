@@ -237,7 +237,7 @@ class BSpline2D(ParametricCurve):
         smoothing: Optional[float] = 0.0,
     ):
         self.points = points.view(Point2D)
-        self.degree = degree
+        self._degree = degree
         self.smoothing = smoothing
 
     @classmethod
@@ -272,6 +272,52 @@ class BSpline2D(ParametricCurve):
             degree of the spline.
         """
         return si.splprep(self.points.T, s=self.smoothing, k=self.degree)[0]
+
+    @property
+    def control_points(self) -> np.ndarray:
+        """Retrieve the control points of the spline."""
+        return self.spline[1].T
+
+    @control_points.setter
+    def control_points(self, value: np.ndarray) -> None:
+        """Set the control points of the spline."""
+        if value.ndim != 2 or (value.shape[1] != 2 and value.shape[0] != 2):
+            raise ValueError(
+                "Control points must be a 2D array with shape (n, 2) or (2, n)."
+            )
+        self.spline[1] = value.T if value.shape[1] == 2 else value
+
+    @property
+    def knots(self) -> np.ndarray:
+        """Retrieve the knot vector of the spline."""
+        return self.spline[0]
+
+    @knots.setter
+    def knots(self, value: np.ndarray) -> None:
+        """Set the knot vector of the spline."""
+        # if value.ndim != 1:
+        #     raise ValueError("Knot vector must be a 1D array.")
+        # self.spline[0] = value
+        raise NotImplementedError(
+            f"Nope, shouldn't do that \n" +
+            f"Trying to replace degree {self.spline[0]} with {value}."
+            )
+
+    @property
+    def degree(self):
+        """Retrieve the degree of the spline."""
+        return self._degree
+
+    @degree.setter
+    def degree(self, value: int) -> None:
+        """Set the degree of the spline."""
+        # if value < 1:
+        #     raise ValueError("Degree must be greater than or equal to 1.")
+        # self.spline[2] = value
+        raise NotImplementedError(
+            f"Nope, shouldn't do that \n" +
+            f"Trying to replace degree {self.spline[2]} with {value}."
+            )
 
     def evaluate_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
         """
@@ -570,7 +616,7 @@ class Bezier(ParametricCurve):
         return (cls(control_points, points), results) if return_results else cls(control_points, points)
 
 
-class SplevBezier(BSpline2D):
+class SplevBezier(ParametricCurve):
     """Bezier curve defined by a B-spline representation.
     Represents a Bezier curve defined by a B-spline representation (tck tuple).
     The resulting curve should be the same as using the Bezier class directly,
@@ -582,8 +628,35 @@ class SplevBezier(BSpline2D):
         control_points: np.ndarray,
         points: np.ndarray = None,
     ):
-        self.control_points = control_points
+        self._control_points = control_points
         self.points = points
+
+    @cached_property
+    def spline(self) -> Tuple[np.ndarray, np.ndarray, int]:
+        """Retrieve the Bspline spline representation of the Bézier curve, which
+        can be used with scipy.interpolate.splev to evaluate the curve.
+
+        This has no real purpose for this Bezier class definition, but could be
+        useful for interfacing with other code that expects a (t, c, k) spline
+        definition.
+
+        Bspline knots are defined as the parameter boundary points (0,1), with
+        multiplicity (degree + 1) to clamp the endpoints.
+
+        Returns:
+            tuple: A tuple (t, c, k) representing the spline.
+        """
+        return (self.knots, self._control_points.T, self.degree)
+
+    # @property
+    # def control_points(self) -> np.ndarray:
+    #     """Retrieve the control points of the spline."""
+    #     return self.spline[1].T
+
+    @cached_property
+    def n_control_points(self) -> int:
+        """Return the number of control points."""
+        return len(self._control_points)
 
     @cached_property
     def degree(self) -> int:
@@ -622,22 +695,61 @@ class SplevBezier(BSpline2D):
         )
         return knot_vector
 
-    @cached_property
-    def spline(self) -> Tuple[np.ndarray, np.ndarray, int]:
-        """Retrieve the Bspline spline representation of the Bézier curve, which
-        can be used with scipy.interpolate.splev to evaluate the curve.
+    def evaluate_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
+        """
+        Evaluate the curve at specified parameter values ``u``.
 
-        This has no real purpose for this Bezier class definition, but could be
-        useful for interfacing with other code that expects a (t, c, k) spline
-        definition.
-
-        Bspline knots are defined as the parameter boundary points (0,1), with
-        multiplicity (degree + 1) to clamp the endpoints.
+        Args:
+            u (float or array-like): Parameter value(s) at which to evaluate
+                the curve.
 
         Returns:
-            tuple: A tuple (t, c, k) representing the spline.
+            ndarray: The evaluated point(s) on the spline.
         """
-        return (self.knots, self.control_points.T, self.degree)
+        return np.array(si.splev(u, self.spline, der=0), dtype=np.float64).T
+
+    def first_deriv_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
+        """
+        Evaluate the curve's first derivative(s) at specified parameter values
+        ``u``.
+
+        Args:
+            u (float or array-like): Parameter value(s) at which to evaluate
+                the curve.
+
+        Returns:
+            ndarray: The evaluated point(s) on the spline.
+        """
+        return np.array(si.splev(u, self.spline, der=1), dtype=np.float64).T
+
+    def second_deriv_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
+        """
+        Evaluate the curve's second derivative(s) at specified parameter values
+        ``u``.
+
+        Args:
+            u (float or array-like): Parameter value(s) at which to evaluate
+                the curve.
+
+        Returns:
+            ndarray: The evaluated point(s) on the spline.
+        """
+        return np.array(si.splev(u, self.spline, der=2), dtype=np.float64).T
+
+    @classmethod
+    def from_control_points(cls, control_points):
+        """
+        Create an instance of the class from control points.
+
+        Args:
+            control_points (np.ndarray): Control points for the spline.
+
+        Returns:
+            SplevCBezier: Instance of the class with the provided control points.
+        """
+        assert control_points.ndim == 2 and control_points.shape[1] == 2, \
+            "Control points must be a 2D array with shape (n, 2)."
+        return cls(control_points)
 
     @classmethod
     def fit(
@@ -680,6 +792,13 @@ class SplevBezier(BSpline2D):
             raise ValueError("points must be a 2D array with shape (N, 2).")
         if endpoints == 'free' and spacing is not None:
             raise ValueError("Spacing method is not applicable when endpoints are free.")
+
+        # Check if there are enough points to fit the curve
+        if len(points) < n_control_points:
+            raise ValueError(
+                "Number of input points must be >= (len(n_control_points) + 1)."
+                + f"\n Got {len(points)} points, expected at least {len(n_control_points) + 1} for a curve with {n_control_points}."
+            )
 
         if isinstance(spacing, np.ndarray):
             n_control_points = len(spacing)
@@ -850,7 +969,7 @@ class SplevCBezier(BSpline2D):
     @property
     def tck(self):
         """
-        Retrieve the spline representation (tck tuple).
+        Retrieve the spline representation (tck tuple). Just a pointer.
 
         The tck format consists of:
             - t: Knot vector (non-decreasing sequence).
@@ -928,6 +1047,42 @@ class SplevCBezier(BSpline2D):
             int: The number of control points.
         """
         return len(self.control_points)
+
+    def resampled_points(self, n_points: int = 199) -> np.ndarray:
+        """
+        Resample the spline at cosine spaced locations, focussed around leading
+        and trailing edge.
+
+        Args:
+            n_points (int): Number of points to sample along the spline.
+
+        Returns:
+            ndarray: Resampled points on the spline.
+        """
+        if n_points % 2 == 0:
+            raise ValueError(
+                "n_points must be odd to avoid duplicate leading edge."
+            )
+        if hasattr(self, "u_leading_edge"):
+            return self.evaluate_at(
+                np.hstack([
+                    cosine_spacing(0, self.u_leading_edge, n_points//2+1),
+                    cosine_spacing(self.u_leading_edge, 1, n_points//2+1)[1:]
+                ])
+            )
+        else:
+            # return self.evaluate_at(np.linspace(0, 1, n_points))
+            raise ValueError("Leading edge not available for resampling.")
+
+    @property
+    def upper_control_points(self) -> np.ndarray:
+        """Retrieve the upper control points of the spline."""
+        return self.control_points[self.n_control_points//2::-1]
+
+    @property
+    def lower_control_points(self) -> np.ndarray:
+        """Retrieve the upper control points of the spline."""
+        return self.control_points[self.n_control_points//2:]
 
     @classmethod
     def from_control_points(cls, control_points):

@@ -6,27 +6,30 @@ import scipy.optimize as opt
 
 from functools import cached_property
 from typing import Union, Tuple
-from abc import ABCMeta, abstractmethod
+from abc import ABCMeta, abstractmethod,ABC
 
 from .data import AirfoilDataFile, AirfoilNormalizer
-from ..util import cosine_spacing, chebyshev_nodes, ensure_1d_vector
+from ..util import cosine_spacing, chebyshev_nodes, ensure_1d_vector, selig
 from .spline import *
 from .geom2d import Point2D
 
 
-class AirfoilBase(metaclass=ABCMeta):
+class AirfoilBase(ABC):
     """Abstract Base Class definition of an :py:class:`Airfoil`.
     ...
     """
 
+    @property
     @abstractmethod
     def surface(self):
         """Returns a parametric surface curve representing the entire airfoil"""
 
+    @property
     @abstractmethod
     def upper_surface(self):
         """Returns the upper surface curve"""
 
+    @property
     @abstractmethod
     def lower_surface(self):
         """Returns the lower surface curve"""
@@ -76,28 +79,39 @@ class BezierAirfoil(AirfoilBase):
 
     def __init__(
         self,
-        data_points: np.ndarray,
-        normalized_points: np.ndarray = None,
+        surface_curve: ParametricCurve,
         name: str = None,
-        full_name: str = None,
+        description: str = None,
     ):
+        # save the surface spline object
+        self.surface_curve = surface_curve
         # the original input points, mainly for reference
-        self.data_points = data_points
-        # the data points after processing, used for fitting
-        self.normalized_points = normalized_points or AirfoilProcessor.normalize(data_points)
-
+        self.data_points = surface_curve.points
         # the shortened name of the airfoil, usually the filename
         self.name = name
         # the full name of the airfoil, usually from the file header
-        self.full_name = full_name or name
+        self.description = description or name
 
     @classmethod
-    def from_array(cls, points: np.ndarray, name: str = None):
+    def from_array(
+        cls,
+        points: np.ndarray,
+        name: str = None,
+        description: str = None,
+        normalize: bool = True
+    ):
         """Creates an Airfoil object from an array of points.
-        Mainly used for input validation.
 
         Args:
-            points (np.ndarray): Array of airfoil points.
+            points (np.ndarray):
+                Array of airfoil coordinate points.
+            name (str):
+                Name of the airfoil.
+            description (str):
+                Description of the airfoil. (Any additional text)
+            normalize (bool):
+                Whether to normalize the points before fitting.
+                Defaults to True.
 
         Raises:
             TypeError: Input must be a numpy array.
@@ -110,14 +124,32 @@ class BezierAirfoil(AirfoilBase):
             raise TypeError("Input must be a numpy array.")
         if points.shape[1] != 2:
             raise ValueError("Input array must have shape (n, 2).")
-        # normalized_points = AirfoilProcessor.normalize(points)
+
+
+        # To improve the fitting of the new spline, points are resampled after
+        # normalization
+        if normalize:
+            spline = AirfoilNormalizer.normalize(points) # returns normalized BSpline2D
+            points = spline.evaluate_at(
+                np.hstack([
+                    cosine_spacing(0, spline.u_leading_edge, num=100),
+                    cosine_spacing(spline.u_leading_edge, 1, num=100)[1:],
+                ])
+            )
+        surfacespline = SplevCBezier.fit(points, 12, spacing='linear', verbose=False, w_damping=1e-3)
+        surfacespline.points = spline.points  # add original points again for reference
+
         return cls(
-            data_points=points,
-            name=name
+            surfacespline,
+            name=name,
+            description=description
         )
 
     @classmethod
-    def from_file(cls, filepath: str):
+    def from_file(cls,
+            filepath: str,
+            normalize: bool = True
+    ):
         """Returns an Airfoil object from a data file.
         Coordinates are normalized before passing to the Airfoil object.
 
@@ -132,121 +164,84 @@ class BezierAirfoil(AirfoilBase):
         """
         datafile = AirfoilDataFile(filepath)
 
-        # normalized_points = AirfoilProcessor.normalize(datafile.points)
-
-        return cls(
-            data_points=datafile.points,
+        return cls.from_array(
+            datafile.points,
             name=datafile.filename,
-            full_name=datafile.header,
+            description=datafile.header,
+            normalize=normalize,
         )
 
-    # TODO add option for other curve types
-    @cached_property
+    @property
     def surface(self) -> ParametricCurve:
-        """Construct the surface spline of the airfoil."""
-        return SplevCBezier(self.normalized_points)
+        """Returns a parametric surface curve representing the entire airfoil."""
+        return self.surface_curve
 
-    @property
-    def cambered(self) -> bool:
-        return True if self.max_camber[1] > 0 else False
+    @cached_property
+    def upper_surface(self):
+        return SplevBezier(
+            self.surface.control_points[self.surface.n_control_points//2::-1]
+        )
 
+    @cached_property
+    def lower_surface(self):
+        return SplevBezier(
+            self.surface.control_points[self.surface.n_control_points//2:]
+        )
 
-    @property
-    def trailing_edge(self) -> Tuple[float, np.ndarray]:
-        """Calculates the trailing edge point.
+    @cached_property
+    def camber_line(self):
+        """Returns the curve object for the camber line of the airfoil.
+
+        The camber line curve is obtained by placing control points midway
+        between the upper and lower control points of the airfoil surface.
+
+        Previously this was done by evaluating the upper and lower surfaces,
+        finding the midpoints defining the camber line, and fitting a curve
+        through these points. Using the control points already available
+        simplifies the process.
 
         Returns:
-            float: The parameter value at the trailing edge (u).
-            np.ndarray: The trailing edge point ([x, y]).
+            ParametricCurve : The camber line object of the airfoil.
         """
-        start_point = self.evaluate_at(0)
-        end_point = self.evaluate_at(1)
-
-        res1 = opt.minimize(lambda u: -np.linalg.norm(np.array([0,0])-self.evaluate_at(u)[0]), 0, bounds=[(0, 1)])
-        res2 = opt.minimize(lambda u: -np.linalg.norm(np.array([0,0])-self.evaluate_at(u)[0]), 1, bounds=[(0, 1)])
-        # if the maximum x value found is not the same at both ends of the
-        # spline, the trailing edge is not properly defined and doubles back on
-        # itself or the coordinates are missing one of the endpoints
-        # ! this is still not ideal. If a trailing edge point is missing somehow
-        # ! extrapolating might lead to a better result than just taking the
-        # ! maximum x value. This is a quick fix for now.
-        if abs(res1.fun - res2.fun) > 1e-5:
-            # take location u with maximum x value, most likely to be trailing edge
-            u_TE = res1.x[0] if -res1.fun>-res2.fun else res2.x[0]
-            return u_TE, self.evaluate_at(u_TE)
-
-        # if endpoints are both at same x-coordinate, return midpoint
-        elif abs(start_point[0] - end_point[0]) < 1e-5:
-            # todo: fix x value to 1 here (if close already)?
-            return 0.5 * (start_point + end_point)
-        else:
-            raise ValueError("Trailing edge not properly defined, possible unaccounted edge case")
-            # return start_point if start_point[0] > end_point[0] else end_point
-
-    @property
-    def leading_edge(self) -> Tuple[float, np.ndarray]:
-        """Finds the leading edge point by maximizing the distance from the
-        trailing edge.
-
-        Additional options are availabe in
-        :py:class:`.data.AirfoilProcessor.get_leading_edge`.
-
-        returns:
-            float: the parameter value at the leading edge (u) np.ndarray: the
-            leading edge point ([x, y])
-        """
-        if trailing_edge is None:
-            trailing_edge = self.trailing_edge
-
-        # initial guess is midway the surface curve/spline
-        init_guess = 0.5
-
-        def objective(u):
-            residuals = trailing_edge - self.evaluate_at(u)
-            return -np.linalg.norm(residuals)
-
-        result = opt.minimize(
-            objective,
-            init_guess,
-            bounds=[(0, 1)],
-            # method="SLSQP",
-            )
-
-        return result.x[0], self.evaluate_at(result.x[0])
-
-    @property
-    def chord_vector(self) -> np.ndarray:
-        """Calculates the chord vector from the leading to trailing edge."""
-        return self.trailing_edge - self.leading_edge
+        # y_upper = self.upper_surface_at(cosine_spacing(0, 1, 1000))
+        # y_lower = self.lower_surface_at(cosine_spacing(0, 1, 1000))
+        # y_camber = 0.5 * (y_upper + y_lower)
+        # return SplevBezier.fit(
+        #     np.column_stack([x, y_camber])
+        # )
+        camber_control_points = np.column_stack([
+            self.upper_surface.control_points[:,0],
+            0.5 * (
+                self.upper_surface.control_points[:,1] +
+                self.lower_surface.control_points[:,1]
+                )
+        ])
+        return SplevBezier(camber_control_points)
 
     @cached_property
-    def u_leading_edge(self) -> np.ndarray:
-        """Determines the leading edge as the point on the spline furthest from
-        the trailing edge.
-        """
-        result = opt.minimize(
-            lambda u: -np.linalg.norm(
-                self.trailing_edge - self.surface.evaluate_at(u[0])
-            ),
-            0.5, # initial guess
-            bounds=[(0, 1)],
-            # method="SLSQP",
+    def thickness_distribution(self):
+        """Returns the thickness distribution of the airfoil."""
+        # x = cosine_spacing(0, 1, 1000)
+        # y_upper = self.upper_surface_at(x)
+        # y_lower = self.lower_surface_at(x)
+        # return y_upper - y_lower
+        thickness_control_points = np.column_stack([
+            self.upper_surface.control_points[:,0],
+            (
+                self.upper_surface.control_points[:,1] -
+                self.lower_surface.control_points[:,1]
             )
+        ])
+        return SplevBezier(thickness_control_points)
 
-        if not result.success:
-            print(result)
-            raise RuntimeError("Failed to find leading edge.")
-        return result.x[0]
-
-    @cached_property
-    def leading_edge(self) -> np.ndarray:
-        """Determines the leading edge as the point on the spline furthest from the trailing edge."""
-        return self.surface.evaluate_at(self.u_leading_edge)
 
     @cached_property
     def upper_surface_at(self) -> si.PchipInterpolator:
         """Interpolator for upper surface spline.
-        Returns upper airfoil ordinates at the supplied ``x``.
+        Returns upper airfoil ordinates at ``x``.
+
+        Usage:
+            `obj.upper_surface_at(x: Union[float, np.ndarray]) -> np.ndarray`
 
         Args:
             x (float, np.ndarray): Chord-line fraction (0 = LE, 1 = TE)
@@ -254,48 +249,72 @@ class BezierAirfoil(AirfoilBase):
         Returns:
             interpolator results: upper surface y ordinate at x.
         """
-        points = self.surface.evaluate_at(
-            cosine_spacing(0, self.u_leading_edge, num=500)
-        ).round(5)
+        points = self.upper_surface.evaluate_at(
+            cosine_spacing(0, 1, num=2000)
+        )[::-1]
+        # filter out all points with non-increasing x-coordinates
+        # this prevents a lot of headaches
         x, y = points[points[:, 0] == np.maximum.accumulate(points[:, 0])].T
         assert np.all(np.diff(x) > 0)
         return si.PchipInterpolator(x, y, extrapolate=False)
 
     @cached_property
     def lower_surface_at(self) -> si.PchipInterpolator:
-        """Interpolator for lower surface spline.
-        Returns lower airfoil ordinates at the supplied ``x``.
+        """Callable interpolator for lower surface spline.
+        Returns lower airfoil ordinates at ``x``.
+
+        Usage:
+            `obj.lower_surface_at(x: Union[float, np.ndarray]) -> np.ndarray`
 
         Args:
             x (float, np.ndarray): Chord-line fraction (0 = LE, 1 = TE)
 
         Returns:
-            interpolator results: lower surface y ordinate at x.
+            float, np.ndarray: lower surface y ordinate at x. (interpolator results)
         """
-        points = self.surface.evaluate_at(
-            cosine_spacing(self.u_leading_edge, 1, num=500)
-        )[::-1].round(5)
+        points = self.lower_surface.evaluate_at(
+            cosine_spacing(0, 1, num=2000)
+        )
         x, y = points[points[:, 0] == np.maximum.accumulate(points[:, 0])].T
         assert np.all(np.diff(x) > 0)
         return si.PchipInterpolator(x, y, extrapolate=False)
 
     @cached_property
-    def camber_line(self) -> si.PchipInterpolator:
-        """Returns the interpolator for the camber line."""
-        x = np.linspace(0, 1, 200)
-        y_upper = self.upper_surface(x)
-        y_lower = self.lower_surface(x)
-        y_camber = 0.5 * (y_upper + y_lower)
-        return si.PchipInterpolator(x, y_camber, extrapolate=False)
+    def camber_line_at(self) -> si.PchipInterpolator:
+        """Callable interpolator for the camber line.
+        Returns camber line ordinates at ``x``.
+
+        Usage:
+            `obj.camber_line_at(x: Union[float, np.ndarray]) -> np.ndarray`
+
+        Args:
+            x (float, np.ndarray): Chord-line fraction (0 = LE, 1 = TE)
+
+        Returns:
+            float, np.ndarray: camber line y ordinate at x. (interpolator results)
+        """
+        points = self.camber_line.evaluate_at(
+            cosine_spacing(0, 1, num=2000)
+        )
+        x, y = points[points[:, 0] == np.maximum.accumulate(points[:, 0])].T
+        assert np.all(np.diff(x) > 0)
+        return si.PchipInterpolator(x, y, extrapolate=False)
 
     def camber_at(self, x: Union[float, np.ndarray]) -> np.ndarray:
-        """Returns the camber at specified x locations."""
-        return self.camber_line(x)
+        """Returns the camber at specified x locations.
+
+        Args:
+            x (float, np.ndarray): Chord-line fraction (0 = LE, 1 = TE)
+
+        Returns:
+            interpolated results: camber value at x.
+        """
+        return self.camber_line_at(x)
 
     def thickness_at(self, x: Union[float, np.ndarray]) -> np.ndarray:
         """Calculates the thickness at specified x locations."""
-        y_upper = self.upper_surface(x)
-        y_lower = self.lower_surface(x)
+        y_upper = self.upper_surface_at(x)
+        y_lower = self.lower_surface_at(x)
         return y_upper - y_lower
 
     def plot(self, n_points: int = 200, show: bool = True):
@@ -336,13 +355,6 @@ class BezierAirfoil(AirfoilBase):
         else:
             raise RuntimeError("Failed to find maximum camber.")
 
-    @property
-    def upper_surface(self):
-        raise NotImplementedError
-
-    @property
-    def lower_surface(self):
-        raise NotImplementedError
 
 
 class CSTAirfoil(AirfoilBase):
@@ -571,7 +583,7 @@ class Airfoil(AirfoilBase):
 
 
     @classmethod
-    def from_array(
+    def from_points(
         cls,
         points: np.ndarray,
         curve_type: str = "bezier",

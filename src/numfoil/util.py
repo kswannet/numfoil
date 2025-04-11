@@ -134,6 +134,13 @@ def chebyshev_nodes(start: float, end:float , num: int) -> np.ndarray:
         [1]                             # append end
         ))
 
+def selig(array) -> np.ndarray:
+    """Return a given array of x-locations in Selig format."""
+    if array[0] != 0.0 or array[-1] != 1.0 or np.all(np.diff(array) > 0):
+        raise ValueError(
+            "Array must start with 0 and end with 1 and be strictly increasing."
+        )
+    return np.append(array[::-1], array[1:])
 
 def weighted_endpoint_spacing(start, end, num_points, weight_func=np.sqrt):
     """Generate points with adjustable weighting for endpoint concentration."""

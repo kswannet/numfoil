@@ -100,7 +100,6 @@ class AirfoilDataFile:
             return False
 
 
-
 # TODO: I feel like this could be merged with the airfoil class, but I have yet
 # TODO| to see the light on how to do this in a nice way.
 # class AirfoilProcessor:
@@ -436,18 +435,21 @@ class AirfoilNormalizer:
         else:
             raise TypeError("Input must be a numpy array or BSpline2D.")
 
-
     @classmethod
     def _normalize_spline(cls, spline: BSpline2D,  find_trailing_edge: bool = True) -> BSpline2D:
         leading_edge, trailing_edge, u_leading_edge = cls._find_leading_trailing_edges(spline,  find_trailing_edge=find_trailing_edge)
         scale, translation, rotation = cls._compute_transformation(leading_edge, trailing_edge)
 
         # Apply transformation to control points
-        ctrl_transformed = rotation @ ((spline.spline[1] + translation) * scale)
-        ctrl_transformed = TransformedArray(ctrl_transformed, scale=scale, translation=translation, rotation=rotation)
+        # ctrl_transformed = rotation @ ((spline.spline[1] + translation) * scale)
+        # ctrl_transformed = TransformedArray(ctrl_transformed, scale=scale, translation=translation, rotation=rotation)
 
         # Replace spline control points
-        spline.spline[1] = ctrl_transformed
+        # spline.spline[1] = ctrl_transformed
+
+        spline.spline[1] = cls._apply_transformation(
+            spline.spline[1], scale, translation, rotation
+        )
 
         # recompute
         leading_edge, trailing_edge, u_leading_edge = cls._find_leading_trailing_edges(spline,  find_trailing_edge=find_trailing_edge)
@@ -459,6 +461,38 @@ class AirfoilNormalizer:
         return spline
 
     @staticmethod
+    def _apply_transformation(points: np.ndarray, scale: float, translation: np.ndarray, rotation: np.ndarray | float) -> np.ndarray:
+        """Applies the transformation to an array of points.
+        Args:
+            points (np.ndarray): The points to be transformed.
+            scale (float): The scaling factor.
+            translation (np.ndarray): The translation vector.
+            rotation (np.ndarray | float): The rotation matrix or angle in radians.
+        Returns:
+            np.ndarray(2, N): The transformed points.
+        """
+        points = np.asarray(points)
+        # return (rotation @ ((points + translation) * scale).T).T.view(Point2D)
+        if isinstance(rotation, float):
+            rotation = np.array([
+                [np.cos(rotation), -np.sin(rotation)],
+                [np.sin(rotation),  np.cos(rotation)]
+            ])
+        elif rotation.shape != (2, 2):
+            raise ValueError("Rotation must be a 2x2 matrix or a rotation angle in radians.")
+
+        if points.ndim == 2 and points.shape[0] != 2:
+            points = points.T
+
+        if translation.ndim == 1:
+            translation = translation[:, np.newaxis]
+
+        return TransformedArray(
+            rotation @ ((points + translation) * scale),
+            (scale, translation, rotation)
+        )
+
+    @staticmethod
     def _remove_consecutive_duplicates(points: np.ndarray) -> np.ndarray:
         """Removes consecutive duplicate points from the array."""
         diff = np.diff(points, axis=0)
@@ -466,7 +500,7 @@ class AirfoilNormalizer:
         return np.vstack([points[0], points[idx]])
 
     @staticmethod
-    def _find_trailing_edge(spline: BSpline2D, find_trailing_edge=True) -> tuple[np.ndarray, np.ndarray]:
+    def _find_trailing_edge(spline: BSpline2D, find_trailing_edge=True, verbose=False) -> tuple[np.ndarray, np.ndarray]:
         """Finds the trailing edge of the airfoil. To account for cases where
         the trailing edge is ill-defined, or missing, there are two methods.
         First, the trailing edge is found by maximizing the distance from the
@@ -495,23 +529,50 @@ class AirfoilNormalizer:
             # res1 = opt.minimize(lambda u: -spline.evaluate_at(u)[0][0], 0, bounds=[(0, 1)])
             # res2 = opt.minimize(lambda u: -spline.evaluate_at(u)[0][0], 1, bounds=[(0, 1)])
 
+            if not res1.success or not res2.success:
+                raise RuntimeError(
+                    "Failed to find trailing edge. \n" +
+                    f"{str(res1)} \n {str(res2)}"
+                )
+
+            start, end = spline.evaluate_at(0), spline.evaluate_at(1)
+
             # if x-locations are not the same, trailing edge is assumed to be
             # at the maximum x-value found, while the other side is missing data
-            if abs(res1.fun - res2.fun) > 1e-5:
+            if abs(start[0] - end[0]) > 1e-5:
                 u_te = res1.x[0] if -res1.fun > -res2.fun else res2.x[0]
                 trailing_edge = spline.evaluate_at(u_te)
                 return trailing_edge #, u_te
-            else:
+            elif abs(start[0] - end[0]) < 1e-5:
                 # if the maximum x values found are the same, the trailing edge
                 # is assumed to be at the midpoint of the start and end points
-                start, end = spline.evaluate_at(0), spline.evaluate_at(1)
-                if abs(start[0] - end[0]) < 1e-5:
-                    trailing_edge = 0.5 * (start + end)
-                else:
-                    raise ValueError(
-                        f"Unable to determine trailing edge. \n" +
-                        f"Start: {start}, End: {end}, u1: {res1.x[0]}, u2: {res2.x[0]}"
-                        )
+                trailing_edge = 0.5 * (start + end)
+            else:
+                # this is probably never reached
+                raise ValueError(
+                    f"Unable to determine trailing edge. \n" +
+                    f"Start: {start}, End: {end}, u1: {res1.x[0]}, u2: {res2.x[0]} \n" +
+                    f"{res1} \n {res2}"
+                    )
+
+            # # if x-locations are not the same, trailing edge is assumed to be
+            # # at the maximum x-value found, while the other side is missing data
+            # if abs(res1.fun - res2.fun) > 1e-5:
+            #     u_te = res1.x[0] if -res1.fun > -res2.fun else res2.x[0]
+            #     trailing_edge = spline.evaluate_at(u_te)
+            #     return trailing_edge #, u_te
+            # else:
+            #     # if the maximum x values found are the same, the trailing edge
+            #     # is assumed to be at the midpoint of the start and end points
+            #     start, end = spline.evaluate_at(0), spline.evaluate_at(1)
+            #     if abs(start[0] - end[0]) < 1e-5:
+            #         trailing_edge = 0.5 * (start + end)
+            #     else:
+            #         raise ValueError(
+            #             f"Unable to determine trailing edge. \n" +
+            #             f"Start: {start}, End: {end}, u1: {res1.x[0]}, u2: {res2.x[0]} \n" +
+            #             f"{res1} \n {res2}"
+            #             )
         else:
             # if argument says not to find trailing edge, this whole ordeal is
             # skipped and the trailing edge is assumed (hoped) to be the
@@ -540,6 +601,8 @@ class AirfoilNormalizer:
             return -np.linalg.norm(trailing_edge - spline.evaluate_at(u))
 
         res = opt.minimize(objective, 0.5, bounds=[(0, 1)])
+        if not res.success:
+            raise RuntimeError("Failed to find leading edge. \n" + str(res))
         return spline.evaluate_at(res.x[0]), res.x[0]
 
     @classmethod
@@ -563,7 +626,6 @@ class AirfoilNormalizer:
         leading_edge, u_leading_edge = cls._find_leading_edge(spline, trailing_edge)
         return leading_edge, trailing_edge, u_leading_edge
 
-
     @staticmethod
     def _compute_transformation(leading_edge, trailing_edge):
         chord = trailing_edge - leading_edge
@@ -575,7 +637,7 @@ class AirfoilNormalizer:
             [np.cos(angle), -np.sin(angle)],
             [np.sin(angle),  np.cos(angle)]
         ])
-        return scale, translation, rotation
+        return (scale, translation, rotation)
 
 
 class TransformedArray(Point2D):
@@ -583,17 +645,26 @@ class TransformedArray(Point2D):
     Numpy Array subclass to store transformed points in a 2D array and retain
     the transformation applied during normalization.
     """
-    def __new__(cls, input_array, scale=None, translation=None, rotation=None):
+    def __new__(cls, input_array, transformation):
         obj = np.asarray(input_array).view(cls)
-        obj.scale = scale
-        obj.translation = translation
-        obj.rotation = rotation
+        obj.transformation = transformation
         return obj
 
     def __array_finalize__(self, obj):
         if obj is None: return
-        self.scale = getattr(obj, 'scale', None)
-        self.translation = getattr(obj, 'translation', None)
-        self.rotation = getattr(obj, 'rotation', None)
+        self.transformation = getattr(obj, 'transformation', None)
 
+    @property
+    def scale(self):
+        """Returns the scaling factor which was applied."""
+        return self.transformation[0]
 
+    @property
+    def translation(self):
+        """Returns the applied translation vector."""
+        return self.transformation[1]
+
+    @property
+    def rotation(self) -> float:
+        """Returns the applied rotation angle in radians."""
+        return self.transformation[2]
