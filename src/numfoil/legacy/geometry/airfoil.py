@@ -599,12 +599,12 @@ class PointsAirfoil(Airfoil):
                 lambda u: -self.upper_surface.evaluate_at(u[0])[1]**2,
                 0.5,
                 bounds=[(0, 1)]
-                )
+            )
         elif output == "x":
             result = minimize(lambda x: -self.upper_surface_at(x[0])**2,
                 0.5,
                 bounds=[(0, 1)]
-                )
+            )
 
         if result.success:
             return result.x[0], np.sqrt(-result.fun)
@@ -1697,3 +1697,52 @@ class AirfoilPlot:
 # from numfoil.util import cosine_spacing
 # airfoil = UIUCAirfoil("src/data/UIUC_airfoils/fx72150a.dat")
 # airfoil.property_plotter
+
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.widgets import CheckButtons
+
+# Assumes your original AirfoilPlot (with all its @property methods) is available
+# and imported in this namespace.
+# We subclass it to add interactive toggles via CheckButtons, keeping
+# all property names (upper_surface, camber_line, etc.) intact.
+
+class AirfoilPlotInteractive(AirfoilPlot):
+    """
+    An interactive AirfoilPlot that adds a set of checkboxes
+    to toggle each drawable feature on or off.
+    """
+    def __init__(self, airfoil: Airfoil, n_points: int = 200) -> None:
+        # Initialize base plot (sets up self.fig, self.ax, self.elements, colors, etc.)
+        super().__init__(airfoil, n_points)
+
+        # Make room on the left for the checkboxes
+        plt.subplots_adjust(left=0.25)
+
+        # Prepare labels and map to property names
+        self._props = list(self.elements.__dict__.keys())
+        self._labels = [name.replace('_', ' ').title() for name in self._props]
+        actives = [False] * len(self._props)
+
+        # Create a new axes for the checkboxes
+        rax = self.fig.add_axes([0.02, 0.4, 0.2, 0.5])
+        self._check = CheckButtons(rax, self._labels, actives)
+        self._label_to_prop = dict(zip(self._labels, self._props))
+
+        # Connect the event handler
+        self._check.on_clicked(self._on_toggle)
+
+        # Initial legend and draw
+        self.ax.legend()
+        plt.show()
+
+    def _on_toggle(self, label: str) -> None:
+        """
+        Callback for CheckButtons: toggles the corresponding plot property.
+        """
+        prop_name = self._label_to_prop[label]
+        # Calling the property will toggle its presence on the axes
+        getattr(self, prop_name)
+        # Update legend and redraw
+        self.ax.legend(loc='best')
+        self.fig.canvas.draw_idle()

@@ -25,6 +25,8 @@ class AirfoilDataFile:
     @cached_property
     def _content(self) -> list[str]:
         """Returns the content of the file as a list of lines."""
+        if not os.path.exists(self.filepath):
+            raise FileNotFoundError(f"File {self.filepath} not found.")
         with open(self.filepath, 'r', encoding='utf-8') as f:
             return f.readlines()
 
