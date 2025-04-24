@@ -106,12 +106,42 @@ class BezierAirfoil(AirfoilBase):
         self.u_leading_edge = 0.5
 
     @classmethod
+    def from_control_points(
+        cls,
+        control_points: np.ndarray,
+        name: str = None,
+        description: str = None,
+        # normalize: bool = True
+    ):
+        """Creates an Airfoil object from control points.
+
+        Args:
+            control_points (np.ndarray):
+                Array of airfoil control points.
+            name (str):
+                Name of the airfoil.
+            description (str):
+                Description of the airfoil. (Any additional text)
+            normalize (bool):
+                    Whether to normalize the points before fitting.
+                    Defaults to True.
+        Returns:
+            Airfoil: Airfoil object initialized with input
+        """
+        return cls(
+            SplevCBezier.from_control_points(control_points),
+            name=name,
+            description=description,
+            data_points=control_points,
+        )
+
+    @classmethod
     def from_array(
         cls,
         points: np.ndarray,
         name: str = None,
         description: str = None,
-        normalize: bool = True
+        normalize: bool = True,
     ):
         """Creates an Airfoil object from an array of points.
 
@@ -138,7 +168,6 @@ class BezierAirfoil(AirfoilBase):
         if points.shape[1] != 2:
             raise ValueError("Input array must have shape (n, 2).")
 
-
         # To improve the fitting of the new spline, points are resampled after
         # normalization
         if normalize:
@@ -149,9 +178,11 @@ class BezierAirfoil(AirfoilBase):
                     cosine_spacing(normalized_bspline.u_leading_edge, 1, num=100)[1:],
                 ])
             )
+        else:
+            new_points = points
         surfacespline = SplevCBezier.fit(new_points, 12, spacing='linear', verbose=False, w_damping=1e-3)
         surfacespline.data_points = normalized_bspline.points  # add original points again for reference
-        surfacespline.new_points = new_points  # add original points again for reference
+        surfacespline.points = points  # add original points again for reference
 
         return cls(
             surfacespline,
@@ -161,9 +192,10 @@ class BezierAirfoil(AirfoilBase):
         )
 
     @classmethod
-    def from_file(cls,
-            filepath: str,
-            normalize: bool = True
+    def from_file(
+        cls,
+        filepath: str,
+        normalize: bool = True
     ):
         """Returns an Airfoil object from a data file.
         Coordinates are normalized before passing to the Airfoil object.
@@ -184,6 +216,68 @@ class BezierAirfoil(AirfoilBase):
             name=datafile.filename,
             description=datafile.header,
             normalize=normalize,
+        )
+
+    @classmethod
+    def from_camber_thickness(
+        cls,
+        thickness_curve: ParametricCurve | np.ndarray,
+        camber_curve: ParametricCurve | np.ndarray,
+        name: str = None,
+        description: str = None
+    ) -> "BezierAirfoil":
+        """
+        Construct airfoil from camber and thickness distributions.
+
+        Args:
+            camber_curve (ParametricCurve): Bezier curve for camber line.
+            thickness_curve (ParametricCurve): Bezier curve for thickness distribution.
+            name (str): Optional name of airfoil.
+            description (str): Optional long description.
+
+        Returns:
+            BezierAirfoil: New instance created from camber + thickness curves.
+        """
+        if not isinstance(camber_curve, type(thickness_curve)):
+            raise TypeError("Camber and thickness curves must be of the same type (curve object or array).")
+
+        if isinstance(camber_curve, ParametricCurve) and isinstance(thickness_curve, ParametricCurve):
+            # Ensure x-coordinates align
+            x_camber = camber_curve.control_points[:, 0]
+            y_camber = camber_curve.control_points[:, 1]
+            x_thickness = thickness_curve.control_points[:, 0]
+            y_thickness = thickness_curve.control_points[:, 1]
+        else:
+            # Assume they are numpy arrays
+            x = camber_curve[:, 0]
+            y_camber = camber_curve[:, 1]
+            x_thickness = thickness_curve[:, 0]
+            y_thickness = thickness_curve[:, 1]
+
+        if not np.all(x_camber == x_thickness):
+            raise ValueError("Camber and thickness curves must have the same x-coordinates.")
+
+        # Reconstruct upper/lower surface control points
+        y_upper = y_camber + 0.5 * y_thickness
+        y_lower = y_camber - 0.5 * y_thickness
+
+        upper_cp = np.column_stack([x[::-1], y_upper[::-1]])  # Reverse for trailing → leading
+        lower_cp = np.column_stack([x[1:], y_lower[1:]])      # Skip duplicate LE point
+
+        # Combine to single surface curve (just like your other logic)
+        control_points = np.vstack([upper_cp, lower_cp])
+
+        surface_curve = SplevBezier(control_points)
+
+        # Attach original components for reference if needed
+        surface_curve.camber_curve = camber_curve
+        surface_curve.thickness_curve = thickness_curve
+
+        return cls(
+            surface_curve,
+            name=name,
+            description=description,
+            data_points=None  # No original coordinate points in this case
         )
 
     @property
@@ -368,12 +462,12 @@ class BezierAirfoil(AirfoilBase):
         # else:
         #     raise RuntimeError("Failed to find maximum camber.")
         result = opt.minimize(
-            lambda u: -self.upper_surface.evaluate_at(u)[0][1], 0.5, bounds=[(0, 1)]
+            lambda u: -self.camber_line.evaluate_at(u)[0][1], 0.5, bounds=[(0, 1)]
         )
         if not result.success:
             print(result)
             raise RuntimeError("Failed to find upper crest.")
-        return self.surface.evaluate_at(result.x[0])
+        return self.camber_line.evaluate_at(result.x[0])
 
     @cached_property
     def leading_edge_radius(self) -> np.ndarray:
@@ -432,7 +526,7 @@ class BezierAirfoil(AirfoilBase):
     @cached_property
     def trailing_edge_vector(self) -> np.ndarray:
         """Vector between the upper and lower surface at the trailing edge."""
-        return self.camber_line.first_deriv_at(1)
+        return self.camber_line.tangent_at(1)[0]
 
     @cached_property
     def leading_edge_vector(self) -> np.ndarray:

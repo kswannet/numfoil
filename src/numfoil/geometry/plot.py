@@ -1,13 +1,14 @@
 from functools import cached_property
 from typing import Tuple, Union, Literal
 from collections.abc import Sequence
+from collections import OrderedDict
 
 import numpy as np
 from matplotlib import pyplot as plt
 from matplotlib.patches import Circle, Arc
 
 from .airfoil import AirfoilBase as Airfoil
-from ..util import Container, cosine_spacing
+from ..util import Container, cosine_spacing, selig
 
 
 import numpy as np
@@ -15,58 +16,46 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Circle, Arc
 
 
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.patches import Arc
+
+
 def toggleable(func):
     """
-    Decorator to make plot methods toggleable via legend clicks.
-    Registers returned artists and enables picking on them.
+    Decorator to mark plot methods as toggleable.
+    Registers all returned artists into self._toggle_artists.
     """
     def wrapper(self, *args, **kwargs):
         artists = func(self, *args, **kwargs)
         if not isinstance(artists, (list, tuple)):
             artists = [artists]
-        # self._toggle_artists.append(artists)
         for art in artists:
-            art.set_picker(25)  # 5 points tolerance
             self._toggle_artists.append(art)
+            art.set_picker(25)
         return artists
     return wrapper
-# def toggleable(func):
-#     """
-#     Decorator to mark plot methods as toggleable and register their artist groups.
-#     """
-#     def wrapper(self, *args, **kwargs):
-#         artists = func(self, *args, **kwargs)
-#         if not isinstance(artists, (list, tuple)):
-#             artists = [artists]
-#         # Store this group for toggling
-#         self._toggle_artists.append(artists)
-#         # Enable pick events for all artists in the group
-#         for art in artists:
-#             art.set_picker(5)
-#         return artists
-#     return wrapper
 
 
 class InteractiveAirfoilPlot:
     """
-    Interactive plotting of airfoil properties.
-    Click on legend entries to toggle visibility of each plot element.
-    Legend is placed outside the main plot area.
+    Interactive airfoil plotting with clickable legend toggles.
+    Legend entries group by label: clicking toggles all artists sharing that label.
+    X-axis fixed at [-0.05, 1.05], equal aspect ratio, constrained layout.
     """
-    def __init__(self, airfoil, n_points=1e3):
+    def __init__(self, airfoil, n_points=200):
         self.airfoil = airfoil
-        self.n_points = int(n_points)
+        self.n_points = n_points
         self._toggle_artists = []
 
-        self.x = cosine_spacing(0, 1, self.n_points)
-        self.u = np.linspace(0, 1, self.n_points*2)
+        self.x = cosine_spacing(0, 1, n_points)
+        self.u = np.linspace(0, 1, n_points*2)
 
-        # Set up figure and axes
-        self.fig, self.ax = plt.subplots(constrained_layout=True)
+        # Set up figure & axes
+        self.fig, self.ax = plt.subplots(constrained_layout=True, figsize=(12, 6))
         self.ax.set_xlabel("Normalized Location Along Chordline (x/c)")
         self.ax.set_ylabel("Normalized Thickness (t/c)")
-        title = getattr(airfoil, 'fullname', 'Airfoil')
-        self.ax.set_title(title)
+        self.ax.set_title(getattr(airfoil, 'fullname', 'Airfoil'))
 
         # Equal aspect ratio and fixed x-range
         self.ax.set_xlim(-0.05, 1.05)
@@ -77,62 +66,50 @@ class InteractiveAirfoilPlot:
         # plt.axis('equal')
         plt.tight_layout()
 
-        # Draw all plot elements initially
-        self._init_plots()
-
-        # Create legend outside and connect pick event
-        self._setup_legend()
-        self.fig.tight_layout()
-        plt.show()
-
-    def _init_plots(self):
-        """
-        Calls all toggleable plot methods to register them and plot initially.
-        """
+        # Plot all toggleable elements
         for name in dir(self):
             if name.startswith('plot_'):
-                method = getattr(self, name)
-                if callable(method):
-                    method()
+                getattr(self, name)()
 
-    def _setup_legend(self):
-        """
-        Places legend outside and sets up click callbacks.
-        """
-        # Place legend to the right of the axes
-        self.legend = self.ax.legend(loc='upper left', bbox_to_anchor=(1.05, 1))
+        # Create legend
+        # self.legend = self.ax.legend(loc='upper left', bbox_to_anchor=(1.05, 1))
 
-        # Map legend entry lines to original artists
-        legend_lines = self.legend.get_lines()
-        # legend_lines = self.legend.get_lines() + self.legend.get_patches()
-        self._legend_map = {leg: orig for leg, orig in zip(legend_lines, self._toggle_artists)}
+        handles, labels = plt.gca().get_legend_handles_labels()
+        by_label = OrderedDict(zip(labels, handles))
+        # self.legend = plt.legend(by_label.values(), by_label.keys())
+        self.legend = self.ax.legend(by_label.values(), by_label.keys(), loc='upper left', bbox_to_anchor=(1.05, 1))
 
-        # Enable picking on legend entries
-        for leg in legend_lines:
-            leg.set_picker(True)
-            leg.set_pickradius(10)
+        for handle in self.legend.legend_handles:
+            handle.set_picker(5)
 
         # Connect pick event
         self.fig.canvas.mpl_connect('pick_event', self._on_pick)
 
+        self.fig.tight_layout()
+        plt.show()
+
     def _on_pick(self, event):
         """
-        Toggle visibility of the corresponding artist when a legend entry is clicked.
+        Toggle visibility of all artists sharing the picked legend label.
         """
-        legend_line = event.artist
-        if legend_line in self._legend_map:
-            orig = self._legend_map[legend_line]
-            vis = not orig.get_visible()
-            orig.set_visible(vis)
-            # Dim or highlight legend entry
-            legend_line.set_alpha(1.0 if vis else 0.2)
-            self.fig.canvas.draw()
+        handle = event.artist
+        label = handle.get_label()
+        # Toggle artists
+        # Determine new visibility from first matching artist
+        group = [art for art in self._toggle_artists if art.get_label() == label]
+        if not group:
+            return
+        new_vis = not group[0].get_visible()
+        for art in group:
+            art.set_visible(new_vis)
+        handle.set_alpha(1.0 if new_vis else 0.2)
+        self.fig.canvas.draw_idle()
 
     @toggleable
     def plot_surface(self):
         return self.ax.plot(
             *self.airfoil.surface.evaluate_at(self.u).T,
-            label='Surface', color='C0'
+            label='Surface', color='g'
         )[0]
 
     @toggleable
@@ -140,7 +117,7 @@ class InteractiveAirfoilPlot:
         return self.ax.plot(
             self.x,
             self.airfoil.upper_surface_at(self.x),
-            label='Upper Surface', color='C1'
+            label='Upper Surface', color='C0'
         )[0]
 
     @toggleable
@@ -148,7 +125,7 @@ class InteractiveAirfoilPlot:
         return self.ax.plot(
             self.x,
             self.airfoil.lower_surface_at(self.x),
-            label='Lower Surface', color='C2'
+            label='Lower Surface', color='C1'
         )[0]
 
     @toggleable
@@ -156,7 +133,7 @@ class InteractiveAirfoilPlot:
         return self.ax.plot(
             self.x,
             self.airfoil.camber_line_at(self.x),
-            label='Camber Line', color='C3'
+            label='Camber Line', color='C2'
         )[0]
 
     @toggleable
@@ -184,37 +161,15 @@ class InteractiveAirfoilPlot:
         # Plot leading edge point (start of radius)
         p_le = self.ax.plot(le[0], le[1], 'o', label='LE Radius', color='C5')[0]
         # Plot center of radius
-        p_c = self.ax.plot(center[0], center[1], 'x', label='_nolegend_', color='C5')[0]
+        p_c = self.ax.plot(center[0], center[1], 'x', label='LE Radius', color='C5')[0]
         # Plot full circle arc representing the radius
         arc = Arc((center[0], center[1]), 2*radius, 2*radius,
                   angle=0, theta1=0, theta2=360,
-                  linestyle='--', fill=False, label='_nolegend_', color='C5')
+                  linestyle='--', linewidth=1.5, fill=False, label='LE Radius', color='C5')
         self.ax.add_patch(arc)
         # Plot line from LE point to center
         line = self.ax.plot([le[0], center[0]], [le[1], center[1]],
-                             '--', label='_nolegend_', color='C5')[0]
-        return [p_le, p_c, arc, line]
-
-
-    @toggleable
-    def plot_leading_edge_radius(self):
-        # Compute leading edge point and radius center
-        le = np.array([0.0, 0.0])
-        u_le = 0.5
-        r = self.airfoil.surface.radius_at(self.airfoil.u_leading_edge)
-        center = le + r * self.airfoil.surface.normal_at(self.airfoil.u_leading_edge)[0]
-        # Plot leading edge point (defines legend)
-        p_le = self.ax.plot(le[0], le[1], 'o', label='LE Radius', color='C5')[0]
-        # Plot center of curvature
-        p_c = self.ax.plot(center[0], center[1], 'x', label='_nolegend_', color='C5')[0]
-        # Plot circle arc
-        arc = Arc((center[0], center[1]), 2*r, 2*r, angle=0,
-                  theta1=0, theta2=360, linestyle='--', fill=False,
-                  label='_nolegend_', color='C5')
-        self.ax.add_patch(arc)
-        # Plot radius line
-        line = self.ax.plot([le[0], center[0]], [le[1], center[1]],
-                             '--', label='_nolegend_', color='C5')[0]
+                             '--', label='LE Radius', color='C5')[0]
         return [p_le, p_c, arc, line]
 
     @toggleable
@@ -222,32 +177,39 @@ class InteractiveAirfoilPlot:
         x, c = self.airfoil.max_camber
         return self.ax.plot(
             [x, x], [0, c],
-            '-*', label='Max Camber'
+            '-*', color='C6',
+            label='Max Camber',
         )[0]
 
     @toggleable
     def plot_max_thickness(self):
         x, t = self.airfoil.max_thickness
+        _, c = self.airfoil.max_camber
         return self.ax.plot(
             [x, x],
-            [-t/2, t/2],
-            '-*', label='Max Thickness'
+            [c-t/2, c+t/2],
+            '-*', color='C7',
+            label='Max Thickness'
         )[0]
 
     @toggleable
     def plot_leading_edge_angle(self):
-        a = np.array([1.0, 0.0])
+        a = np.array([0.0, 0.0])
         vect = self.airfoil.leading_edge_vector
-        b = a - vect * 10
-        line = self.ax.plot([a[0], b[0]], [a[1], b[1]], '-', label='TE Angle')[0]
+        b = (a + vect) * 3
+        x, y = np.column_stack([a, b])
+        line = self.ax.plot(x, y, '-', color='C8',
+            label=f'LE Angle {self.airfoil.leading_edge_angle:.2f}deg'
+        )[0]
         return line
 
     @toggleable
     def plot_trailing_edge_angle(self):
         a = np.array([1.0, 0.0])
         vect = self.airfoil.trailing_edge_vector
-        b = a - vect * 10
-        line = self.ax.plot([a[0], b[0]], [a[1], b[1]], '-', label='TE Angle')[0]
+        b = a - vect * 0.3
+        x, y = np.column_stack([a, b])
+        line = self.ax.plot(x, y, '-', color='C9', label='TE Angle')[0]
         return line
 
     @toggleable
@@ -255,10 +217,19 @@ class InteractiveAirfoilPlot:
         artists = []
         a = np.array([1.0, 0.0])
         for vect in (self.airfoil.trailing_edge_upper_vector, self.airfoil.trailing_edge_lower_vector):
-            b = a - vect * 6
-            l = self.ax.plot([a[0], b[0]], [a[1], b[1]], '-', label='TE Wedge')[0]
+            b = a - vect * 0.3
+            x, y = np.column_stack([a, b])
+            l = self.ax.plot(x, y, 'k-', label='TE Wedge')[0]
             artists.append(l)
         return artists
+
+    @toggleable
+    def plot_upper_crest(self):
+        return self.ax.plot(
+            *self.airfoil.upper_crest,
+            '*', color='C10',
+            label='Upper Crest'
+        )[0]
 
 
 class AirfoilPlot:
