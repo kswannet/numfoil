@@ -917,7 +917,6 @@ class SplevCBezier(BSpline2D):
         self.points = points
         self._validate_degree_and_knots()
 
-
     def _validate_degree_and_knots(self):
         # Get the sorted list of unique knots and calculate the number of segments
         unique_knots = sorted(set(self.knots))
