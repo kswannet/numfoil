@@ -92,7 +92,7 @@ class BezierAirfoil(AirfoilBase):
         surface_curve: ParametricCurve,
         name: str = None,
         description: str = None,
-        data_points: np.ndarray = None,
+        # data_points: np.ndarray = None,
     ):
         # save the surface spline object
         self.surface_curve = surface_curve
@@ -111,7 +111,8 @@ class BezierAirfoil(AirfoilBase):
         control_points: np.ndarray,
         name: str = None,
         description: str = None,
-        # normalize: bool = True
+        # normalize: bool = True,
+        **kwargs
     ):
         """Creates an Airfoil object from control points.
 
@@ -132,29 +133,37 @@ class BezierAirfoil(AirfoilBase):
             SplevCBezier.from_control_points(control_points),
             name=name,
             description=description,
-            data_points=control_points,
+            # data_points=control_points,
         )
 
     @classmethod
-    def from_array(
+    def from_coordinate_array(
         cls,
         points: np.ndarray,
         name: str = None,
         description: str = None,
         normalize: bool = True,
+        fit_method: str = "split_u_l",
+        **kwargs: dict
     ):
         """Creates an Airfoil object from an array of points.
 
         Args:
             points (np.ndarray):
                 Array of airfoil coordinate points.
+
             name (str):
                 Name of the airfoil.
+
             description (str):
                 Description of the airfoil. (Any additional text)
+
             normalize (bool):
                 Whether to normalize the points before fitting.
-                Defaults to True.
+                Defaults to True. Keep it True, please.
+                (if set to False, please don't, but also you better be damn sure
+                the coordinates are properly formatted with a proper leading and
+                trailing edge)
 
         Raises:
             TypeError: Input must be a numpy array.
@@ -168,34 +177,77 @@ class BezierAirfoil(AirfoilBase):
         if points.shape[1] != 2:
             raise ValueError("Input array must have shape (n, 2).")
 
-        # To improve the fitting of the new spline, points are resampled after
-        # normalization
+        # To improve the fitting of the new spline, points are resampled from
+        # the normalized bspline
         if normalize:
-            normalized_bspline = AirfoilNormalizer.normalize(points) # returns normalized BSpline2D
-            new_points = normalized_bspline.evaluate_at(
+            normalized_bspline = AirfoilNormalizer.normalize(points)
+            points = normalized_bspline.evaluate_at(
                 np.hstack([
                     cosine_spacing(0, normalized_bspline.u_leading_edge, num=100),
                     cosine_spacing(normalized_bspline.u_leading_edge, 1, num=100)[1:],
                 ])
             )
-        else:
-            new_points = points
-        surfacespline = SplevCBezier.fit(new_points, 12, spacing='linear', verbose=False, w_damping=1e-3)
-        surfacespline.data_points = normalized_bspline.points  # add original points again for reference
-        surfacespline.points = points  # add original points again for reference
+
+        match fit_method:
+            case "full":
+                # Use the composite bezier class to fit the entire curve at once
+                surfacespline = SplevCBezier.fit(
+                    points,
+                    kwargs.get("n_control_points", 12),
+                    spacing=kwargs.get("spacing", "linear"),
+                    verbose=False,
+                    w_damping=kwargs.get("w_damping", 1e-3),
+                )
+            case "split_u_l":
+                # split the points in upper and lower and fit those seperatly
+                # prefered method as it is much faster
+                upper = SplevBezier.fit(
+                    points[len(points)//2::-1],
+                    n_control_points=kwargs.get("n_control_points", 12),
+                    spacing=kwargs.get("spacing", "linear"),
+                    verbose=False,
+                    w_damping=kwargs.get("w_damping", 1e-1),
+                    method="SLSQP",
+                    start_clamp=kwargs.get("start_clamp", '0'),
+                    end_clamp=kwargs.get("end_clamp", '0')
+                )
+                lower = SplevBezier.fit(
+                    points[len(points)//2:],
+                    n_control_points=kwargs.get("n_control_points", 12),
+                    spacing=kwargs.get("spacing", "linear"),
+                    verbose=False,
+                    w_damping=kwargs.get("w_damping", 1e-1),
+                    method="SLSQP",
+                    start_clamp=kwargs.get("start_clamp", '0'),
+                    end_clamp=kwargs.get("end_clamp", '0')
+                )
+                surfacespline = SplevCBezier.from_control_points(
+                    np.vstack([
+                        upper.control_points.round(6)[::-1],
+                        lower.control_points.round(6)[1:]
+                    ])
+                )
+            case "split_t_c":
+                raise NotImplementedError
+
+
+        # add original points again for reference
+        surfacespline.data_points = normalized_bspline.points
 
         return cls(
             surfacespline,
             name=name,
             description=description,
-            data_points=points,
+            # data_points=new_points,
         )
 
     @classmethod
     def from_file(
         cls,
         filepath: str,
-        normalize: bool = True
+        normalize: bool = True,
+        data_type: str = "coordinates",
+        **kwargs: dict
     ):
         """Returns an Airfoil object from a data file.
         Coordinates are normalized before passing to the Airfoil object.
@@ -210,13 +262,24 @@ class BezierAirfoil(AirfoilBase):
             Airfoil: Airfoil object initialized with data from file.
         """
         datafile = AirfoilDataFile(filepath)
-
-        return cls.from_array(
-            datafile.points,
-            name=datafile.filename,
-            description=datafile.header,
-            normalize=normalize,
-        )
+        match data_type:
+            case "coordinates":
+                return cls.from_coordinate_array(
+                    datafile.points,
+                    name=datafile.filename,
+                    description=datafile.header,
+                    normalize=normalize,
+                    **kwargs
+                )
+            case "control_points":
+                return cls.from_control_points(
+                    datafile.points,
+                    name=datafile.filename,
+                    description=datafile.header,
+                    **kwargs,
+                )
+            case _:
+                raise ValueError(f"Unknown data type: {data_type}")
 
     @classmethod
     def from_camber_thickness(
@@ -277,7 +340,6 @@ class BezierAirfoil(AirfoilBase):
             surface_curve,
             name=name,
             description=description,
-            data_points=None  # No original coordinate points in this case
         )
 
     @property

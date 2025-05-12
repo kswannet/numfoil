@@ -276,7 +276,7 @@ class BSpline2D(ParametricCurve):
     @property
     def control_points(self) -> np.ndarray:
         """Retrieve the control points of the spline."""
-        return self.spline[1].T
+        return self.spline[1].T.view(Point2D)
 
     @control_points.setter
     def control_points(self, value: np.ndarray) -> None:
@@ -330,7 +330,7 @@ class BSpline2D(ParametricCurve):
         Returns:
             ndarray: The evaluated point(s) on the spline.
         """
-        return np.array(si.splev(u, self.spline, der=0), dtype=np.float64).T
+        return np.asarray(si.splev(u, self.spline, der=0), dtype=np.float64).T.view(Point2D)
 
     def first_deriv_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
         """
@@ -344,7 +344,7 @@ class BSpline2D(ParametricCurve):
         Returns:
             ndarray: The evaluated point(s) on the spline.
         """
-        return np.array(si.splev(u, self.spline, der=1), dtype=np.float64).T
+        return np.asarray(si.splev(u, self.spline, der=1), dtype=np.float64).T
 
     def second_deriv_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
         """
@@ -358,7 +358,7 @@ class BSpline2D(ParametricCurve):
         Returns:
             ndarray: The evaluated point(s) on the spline.
         """
-        return np.array(si.splev(u, self.spline, der=2), dtype=np.float64).T
+        return np.asarray(si.splev(u, self.spline, der=2), dtype=np.float64).T
 
 
 class Bezier(ParametricCurve):
@@ -618,7 +618,8 @@ class Bezier(ParametricCurve):
 
 class SplevBezier(ParametricCurve):
     """Bezier curve defined by a B-spline representation.
-    Represents a Bezier curve defined by a B-spline representation (tck tuple).
+    Represents a Bezier curve defined by a B-spline representation (tck tuple)
+    with the knot vector clamping the endpoints.
     The resulting curve should be the same as using the Bezier class directly,
     whoever, this version uses the scipy.interpolate.splev method for
     evaluations.
@@ -628,7 +629,7 @@ class SplevBezier(ParametricCurve):
         control_points: np.ndarray,
         points: np.ndarray = None,
     ):
-        self._control_points = control_points
+        self._control_points = control_points.view(Point2D)
         self.points = points
 
     @cached_property
@@ -682,11 +683,6 @@ class SplevBezier(ParametricCurve):
             Returns:
                 np.ndarray: Knot vector of the spline.
         """
-        # warning(
-        #     "A Bézier curve does not normally have knots. "
-        #     + "A knot vector clamping the endpoints is constructed for a Bspline definition.\n"
-        #     + "For a Bspline defintion of the bezier curve, call the spline property."
-        # )
         knot_vector = np.hstack(
             [
             [0.0] * (self.degree + 1),
@@ -706,7 +702,7 @@ class SplevBezier(ParametricCurve):
         Returns:
             ndarray: The evaluated point(s) on the spline.
         """
-        return np.array(si.splev(u, self.spline, der=0), dtype=np.float64).T
+        return np.asarray(si.splev(u, self.spline, der=0), dtype=np.float64).T.view(Point2D)
 
     def first_deriv_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
         """
@@ -720,7 +716,7 @@ class SplevBezier(ParametricCurve):
         Returns:
             ndarray: The evaluated point(s) on the spline.
         """
-        return np.array(si.splev(u, self.spline, der=1), dtype=np.float64).T
+        return np.asarray(si.splev(u, self.spline, der=1), dtype=np.float64).T
 
     def second_deriv_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
         """
@@ -734,7 +730,7 @@ class SplevBezier(ParametricCurve):
         Returns:
             ndarray: The evaluated point(s) on the spline.
         """
-        return np.array(si.splev(u, self.spline, der=2), dtype=np.float64).T
+        return np.asarray(si.splev(u, self.spline, der=2), dtype=np.float64).T
 
     @classmethod
     def from_control_points(cls, control_points):
@@ -757,10 +753,12 @@ class SplevBezier(ParametricCurve):
         points: np.ndarray,
         n_control_points: int = 12,
         spacing: str | None = None,
-        endpoints: str | None = 'data',
+        start_clamp: str | None = 'data',
+        end_clamp: str | None = 'data',
         w_damping: float = 1e-3,
         verbose: bool = False,
-        method: str = "SLSQP",
+        method: str | None = "SLSQP",
+        damping_type: str = 'deriv',
     ):
         """Fit a Bézier curve to the given points using a B-spline representation.
 
@@ -779,19 +777,25 @@ class SplevBezier(ParametricCurve):
                 Weight for the damping term in the optimization objective.
                 Defaults to 1e-3.
 
-            endpoints (str):
-                Where the curve end points should be fixed. Options are:
-                - 'data': endpoints are fixed to the data points.
-                - 'free': endpoints are free to move.
-                - '0-1': endpoints are fixed to (0, 0) and (1, 0).
+            # endpoints (str):
+            #     Where the curve end points should be fixed. Options are:
+            #     - 'data': endpoints are fixed to the data points.
+            #     - 'free': endpoints are free to move.
+            #     - '0-1': endpoints are fixed to (0, 0) and (1, 0).
+
+            verbose (bool):
+                Whether to print additional optimization result information.
+                Defaults to False.
+
+            method (str):
+                scipy.optimize.minimize optimization method to use.
+
 
         Returns:
             SplevBezier: Fitted Bézier curve.
         """
         if points.ndim != 2 or points.shape[1] != 2:
             raise ValueError("points must be a 2D array with shape (N, 2).")
-        if endpoints == 'free' and spacing is not None:
-            raise ValueError("Spacing method is not applicable when endpoints are free.")
 
         # Check if there are enough points to fit the curve
         if len(points) < n_control_points:
@@ -803,27 +807,45 @@ class SplevBezier(ParametricCurve):
         if isinstance(spacing, np.ndarray):
             n_control_points = len(spacing)
 
-        # adjust number of control points if endpoints are fixed
-        # if endpoints != 'free':
-        #     n_control_points -= 2 # 2 endpoints are fixed
-        # #    init_guess = init_guess[1:-1]
-
         init_guess = points[
             np.linspace(0, len(points) - 1, n_control_points, dtype=int)
         ]
 
-        match endpoints:
-            case 'data':
-                start_point, end_point = points[0], points[-1]
-            case '0-1':
-                start_point, end_point = (Point2D([0, 0]), Point2D([1, 0]))
-            case _:
-                pass
+        if not isinstance(spacing, np.ndarray):
+            # adjust number of control points if endpoints are fixed
+            if start_clamp is not None:
+                n_control_points -= 1
+                init_guess = init_guess[1:]
+            if end_clamp is not None:
+                n_control_points -= 1
+                init_guess = init_guess[:-1]
+
+        if isinstance(start_clamp, (str, type(None))):
+            if start_clamp in {'data', None}:
+                start_point = points[0]
+            elif start_clamp in {'origin', '0'}:
+                start_point = Point2D([0, 0])
+        elif isinstance(start_clamp, (np.ndarray, tuple, list)):
+            start_point = np.asarray(start_clamp).view(Point2D)
+
+        if isinstance(end_clamp, (str, type(None))):
+            if end_clamp in {'data', None}:
+                end_point = points[-1]
+            elif end_clamp == '1':
+                end_point = Point2D([1, 0])
+        elif isinstance(end_clamp, (np.ndarray, tuple, list)):
+            end_point = np.asarray(end_clamp).view(Point2D)
+
 
         if spacing is not None:
             init_guess = init_guess[:, 1]
             if isinstance(spacing, np.ndarray):
-                    x_control_points = spacing
+                if not len(spacing) == n_control_points:
+                    raise ValueError(
+                        "Length of spacing array must match number of control points. "
+                         + "make sure to subtract clamped points from the total number when defining the spacing"
+                    )
+                x_control_points = spacing
             else:
                 match spacing:
                     case "cosine":
@@ -834,6 +856,11 @@ class SplevBezier(ParametricCurve):
                         x_control_points = chebyshev_nodes(start_point[0], end_point[0], n_control_points)
                     case _:
                         raise ValueError("Invalid spacing method.")
+        else:
+            pass
+            # raise NotImplementedError(
+            #     "Spacing method not implemented. Use 'cosine', 'linear', or 'chebyshev'."
+            # )
 
 
         def objective(flat_control_points: np.ndarray) -> np.ndarray:
@@ -849,35 +876,68 @@ class SplevBezier(ParametricCurve):
                 control_points = np.column_stack((x_control_points, flat_control_points))
             else:
                 control_points = flat_control_points.reshape(-1, 2)  # unflatten
-            if endpoints != 'free':
-                control_points = np.vstack((start_point, control_points, end_point))
 
-            curve_points = cls(control_points).evaluate_at(np.linspace(0, 1, 500))
-            distances, _ = KDTree(curve_points).query(points)
+            if start_clamp is not None:
+                control_points = np.vstack((start_point, control_points))
+            if end_clamp is not None:
+                control_points = np.vstack((control_points, end_point))
 
-            # control point location regularization
-            smoothness_penalty = w_damping * np.sum(
-                np.linalg.norm(
-                    control_points,
-                    axis=1,
-                )
-            )
-            return np.sum(distances)**2 + smoothness_penalty
-        result = opt.minimize(objective, init_guess.ravel(), method=method, options={'maxiter': 1000})
+            curve = cls(control_points).evaluate_at(np.linspace(0, 1, 1000))
+            distances, _ = KDTree(curve).query(points)
+
+            # control point location regularization to penalize oscillations
+            match damping_type:
+                case 'ydiff':
+                    # penalize based on the difference in y values
+                    smoothness_penalty = np.sum(np.diff(control_points[:,1]) ** 2)
+                case 'dist' | 'tree':
+                    # * query the KDTree to get distances of the control points to the curve
+                    smoothness_penalty = np.sum(KDTree(curve).query(control_points)[0])
+                case 'deriv':
+                    # 2nd derivative approximation
+                    smoothness_penalty = np.sum(
+                        np.linalg.norm(
+                            control_points[:-2] - 2*control_points[1:-1] + control_points[2:],
+                            axis=1
+                        )**2
+                    ) / (
+                        len(control_points) * (control_points[:,1].max() - control_points[:,1].min())
+                    )
+                case _:
+                    raise ValueError(
+                        f"Invalid damping type: {damping_type}. "
+                        + "Choose 'ydiff', 'dist', or 'deriv'."
+                    )
+            return np.sum(distances)**2 + w_damping * smoothness_penalty
+
+        result = opt.minimize(
+            objective,
+            init_guess.ravel(),
+            method=method,
+            options={
+                'maxiter': 1000,
+                'disp': verbose,
+                'ftol': 1e-12,
+                }
+        )
 
         if spacing is not None:
             control_points = np.column_stack((x_control_points, result.x))
         else:
             control_points = result.x.reshape(-1, 2)  # unflatten
-        if endpoints != 'free':
-            control_points = np.vstack((start_point, control_points, end_point))
+
+        if start_clamp is not None:
+            control_points = np.vstack((start_point, control_points))
+        if end_clamp is not None:
+            control_points = np.vstack((control_points, end_point))
 
         if verbose:
             print(result)
         if not result.success:
             print(result)
             raise ValueError(
-                f"failed to find u, optimization success {result.success}"
+                f"failed to find u, optimization success {result.success} \n"
+                + f"{result.message}"
                 )
 
         return cls(control_points, points)
@@ -1047,6 +1107,17 @@ class SplevCBezier(BSpline2D):
         """
         return len(self.control_points)
 
+    @property
+    def upper_control_points(self) -> np.ndarray:
+        """Retrieve the upper control points of the spline."""
+        return self.control_points[self.n_control_points//2::-1]
+
+    @property
+    def lower_control_points(self) -> np.ndarray:
+        """Retrieve the upper control points of the spline."""
+        return self.control_points[self.n_control_points//2:]
+
+
     def resampled_points(self, n_points: int = 199) -> np.ndarray:
         """
         Resample the spline at cosine spaced locations, focussed around leading
@@ -1062,26 +1133,12 @@ class SplevCBezier(BSpline2D):
             raise ValueError(
                 "n_points must be odd to avoid duplicate leading edge."
             )
-        if hasattr(self, "u_leading_edge"):
-            return self.evaluate_at(
-                np.hstack([
-                    cosine_spacing(0, self.u_leading_edge, n_points//2+1),
-                    cosine_spacing(self.u_leading_edge, 1, n_points//2+1)[1:]
-                ])
-            )
-        else:
-            # return self.evaluate_at(np.linspace(0, 1, n_points))
-            raise ValueError("Leading edge not available for resampling.")
-
-    @property
-    def upper_control_points(self) -> np.ndarray:
-        """Retrieve the upper control points of the spline."""
-        return self.control_points[self.n_control_points//2::-1]
-
-    @property
-    def lower_control_points(self) -> np.ndarray:
-        """Retrieve the upper control points of the spline."""
-        return self.control_points[self.n_control_points//2:]
+        return self.evaluate_at(
+            np.hstack([
+                cosine_spacing(0, 0.5, n_points//2+1),
+                cosine_spacing(0.5, 1, n_points//2+1)[1:]
+            ])
+        )
 
     @classmethod
     def from_control_points(cls, control_points):
@@ -1116,6 +1173,7 @@ class SplevCBezier(BSpline2D):
         w_overlap: float = 1e3,
         clamp_origin: bool = True,
         verbose: bool = False,
+        damping_type: str = 'deriv'
     ) -> BSpline2D:
         """
         Fit an Bspline-based composite bezier curve through given airfoil
@@ -1167,12 +1225,6 @@ class SplevCBezier(BSpline2D):
         Returns:
             AirfoilBezier: Fitted airfoil-specific Bézier curve.
         """
-        # if clamp_origin and not isinstance(points, NormalizedAirfoilCoordinates):
-        #     warning(
-        #         "Clamping the leading edge to the origin requires normalized input data.\n"
-        #         + "If the input data is not an instance of the :py:class:`NormalizedAirfoilCoordinates` this can not be verified"
-        #     )
-
         # First redefine some of the parameters needed
         # The degree is per definition:
         degree = n_control_points - 1
@@ -1294,13 +1346,31 @@ class SplevCBezier(BSpline2D):
             distances, _ = KDTree(curve).query(points)
 
             # Penalize oscillations in y values
-            # smoothness_penalty = w_damping * np.sum(np.diff(y_values) ** 2)
-            # smoothness_penalty = w_damping * np.sum(np.diff(y_values)) ** 2
-            # query the KDTree to get distances of the control points to the curve
-            smoothness_penalty = w_damping * np.sum(KDTree(curve).query(control_points)[0])
+            match damping_type:
+                case 'ydiff':
+                    # penalize based on the difference in y values
+                    smoothness_penalty = np.sum(np.diff(y_values) ** 2)
+                case 'dist' | 'tree':
+                    # * query the KDTree to get distances of the control points to the curve
+                    smoothness_penalty = np.sum(KDTree(curve).query(control_points)[0])
+                case 'deriv':
+                    # 2nd derivative approximation
+                    smoothness_penalty = np.sum(
+                        np.linalg.norm(
+                            control_points[:-2] - 2*control_points[1:-1] + control_points[2:],
+                            axis=1
+                        )**2
+                    ) / (
+                        len(control_points) * (control_points[:,1].max() - control_points[:,1].min())
+                    )
+                case _:
+                    raise ValueError(
+                        f"Invalid damping type: {damping_type}. "
+                        + "Choose 'ydiff', 'dist', or 'deriv'."
+                    )
 
             # Penilize corssover / intersection of upper and lower surface
-            overlap_penalty = w_overlap * np.sum(
+            overlap_penalty = np.sum(
                 np.maximum(
                     0,
                     - cls(tck).evaluate_at(np.linspace(0, 0.2, 2000)).T[1]
@@ -1310,7 +1380,11 @@ class SplevCBezier(BSpline2D):
 
             # final objective is the square of the sum of the distances,
             # plus the smoothness and overlap penalties
-            return np.sum(distances)**2 + smoothness_penalty + overlap_penalty
+            return (
+                np.sum(distances)**2
+                + w_damping * smoothness_penalty
+                + w_overlap * overlap_penalty
+            )
 
         # Define constraints for optimization
         constraints = [
@@ -1671,134 +1745,6 @@ class CSTCurve(Curve):
     d2S = shape_second_deriv
 
 
-class BezierAirfoilSurface(Bezier):
-    """Bezier curve subclass tailored for airfoil geometry."""
-    def __init__(
-        self,
-        control_points: np.ndarray,
-        points: np.ndarray = None,
-    ):
-        """
-        Initialize an AirfoilBezier instance.
-
-        Args:
-            control_points (np.ndarray): Control points defining the airfoil curve.
-            points (np.ndarray, optional): Input coordinates for fitting the curve.
-        """
-        super().__init__(control_points, points)
-
-    @classmethod
-    def fit(
-        cls,
-        points: np.ndarray,
-        n_control_points: int = 6,
-        spacing: Union[str, np.ndarray] = "cosine",
-        method: str = "least_squares",
-        endpoint_clamping = False,
-    ) -> "AirfoilBezier":
-        """
-        Fit an AirfoilBezier curve to the given airfoil points.
-
-        Args:
-            points (np.ndarray): Input airfoil points of shape (m, 2).
-                Must follow the order: trailing edge -> upper surface ->
-                leading edge -> lower surface -> trailing edge.
-            n_control_points (int): Number of control points per airfoil
-                surface. Total number of control points will be 2*n+1, n for the
-                upper surface, n for the lower surface, and one explicitly in
-                the origin (leading edge).
-            spacing (np.ndarray or str): Predefined x-locations for control
-                points in array (from [0,1], without repeated points), or a
-                string defining the type of spacing used.
-            method (str): Fitting method, either "least_squares" or "L2_norm".
-
-        Returns:
-            AirfoilBezier: Fitted airfoil-specific Bézier curve.
-        """
-        if points.ndim != 2 or points.shape[1] != 2:
-            raise ValueError("points must be a 2D array with shape (m, 2).")
-
-        if len(points) < n_control_points * 2 + 1:
-            raise ValueError(
-                "Number of input points must be >= (2 * len(x_control_points) + 1)."
-            )
-
-        if endpoint_clamping:
-            n_control_points -= 2 # endpoints are fixed to data
-
-        # constant initial y-values guess, taken at 25% and 75% indices
-        # init_guess = np.hstack((
-        #     [points[len(points) * 1 // 4, 1]] * n_control_points,  # Approx. upper mid-point
-        #     [points[len(points) * 3 // 4, 1]] * n_control_points   # Approx. lower mid-point
-        # ))
-
-        # initial guesses are taken from data points
-        init_guess = points[
-            np.linspace(0, len(points) - 1, n_control_points * 2, dtype=int)
-        ][:,0]
-
-        # Parametric locations of data on curve approximated by arc length
-        u_target = cls.arc_lengths(points, normalize=True)
-
-        if isinstance(spacing, np.ndarray):
-            x_control_points = spacing
-        elif isinstance(spacing, str):
-            match spacing:
-                case "cosine":
-                    x_control_points = cosine_spacing(0, 1, n_control_points)
-                case "linear":
-                    x_control_points = np.linspace(0, 1, n_control_points)
-                case "chebyshev":
-                    x_control_points = chebyshev_nodes(0, 1, n_control_points )
-
-        def combine_x_y(y_values):
-            """
-            Combine fixed x-values with optimized y-values into control points.
-            Args:
-                y_values (np.ndarray): Optimized y-values (concatenated upper and lower).
-
-            Returns:
-                np.ndarray: Complete control points, including clamped leading edge.
-            """
-            y_upper, y_lower = np.split(y_values, 2)
-            control_points = np.vstack((
-                np.column_stack((x_control_points[::-1], y_upper)),  # Upper surface
-                [0, 0],                                              # Leading edge (clamped)
-                np.column_stack((x_control_points, y_lower)),        # Lower surface
-            ))
-            return control_points
-
-        # Define the objective function for fitting
-        def objective(y_values):
-            control_points = combine_x_y(y_values)
-            if endpoint_clamping:
-                control_points = np.vstack(
-                    (points[0], control_points, points[-1])
-                )
-            curve_points = cls(control_points).evaluate_at(u_target)
-            residuals = points - curve_points
-            match method:
-                case "least_squares":
-                    return residuals.ravel()  # Flatten residuals
-                case "L2_norm":
-                    return np.linalg.norm(residuals, axis=1).sum()
-                case _:
-                    raise ValueError("Invalid method. Use 'least_squares' or 'L2_norm'.")
-
-        # Perform optimization
-        match method:
-            case "least_squares":
-                results = opt.least_squares(objective, init_guess)
-            case "L2_norm":
-                results = opt.minimize(objective, init_guess)
-            case _:
-                raise ValueError("Invalid method. Use 'least_squares' or 'L2_norm'.")
-
-        # Generate final control points
-        y_optimized = results.x
-        control_points = combine_x_y(y_optimized)
-
-        return cls(control_points, points)
 
 
 class CSTAirfoilSurface:
