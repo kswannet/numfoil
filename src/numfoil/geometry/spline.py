@@ -759,6 +759,7 @@ class SplevBezier(ParametricCurve):
         verbose: bool = False,
         method: str | None = "SLSQP",
         damping_type: str = 'deriv',
+        constraints: Optional[List[dict]] = None,
     ):
         """Fit a Bézier curve to the given points using a B-spline representation.
 
@@ -797,15 +798,15 @@ class SplevBezier(ParametricCurve):
         if points.ndim != 2 or points.shape[1] != 2:
             raise ValueError("points must be a 2D array with shape (N, 2).")
 
+        if isinstance(spacing, np.ndarray):
+            n_control_points = len(spacing)
+
         # Check if there are enough points to fit the curve
         if len(points) < n_control_points:
             raise ValueError(
                 "Number of input points must be >= (len(n_control_points) + 1)."
                 + f"\n Got {len(points)} points, expected at least {len(n_control_points) + 1} for a curve with {n_control_points}."
             )
-
-        if isinstance(spacing, np.ndarray):
-            n_control_points = len(spacing)
 
         init_guess = points[
             np.linspace(0, len(points) - 1, n_control_points, dtype=int)
@@ -883,7 +884,8 @@ class SplevBezier(ParametricCurve):
                 control_points = np.vstack((control_points, end_point))
 
             curve = cls(control_points).evaluate_at(np.linspace(0, 1, 1000))
-            distances, _ = KDTree(curve).query(points)
+            curve_kdtree = KDTree(curve)
+            distances, _ = curve_kdtree.query(points)
 
             # control point location regularization to penalize oscillations
             match damping_type:
@@ -892,7 +894,7 @@ class SplevBezier(ParametricCurve):
                     smoothness_penalty = np.sum(np.diff(control_points[:,1]) ** 2)
                 case 'dist' | 'tree':
                     # * query the KDTree to get distances of the control points to the curve
-                    smoothness_penalty = np.sum(KDTree(curve).query(control_points)[0])
+                    smoothness_penalty = np.sum(curve_kdtree.query(control_points)[0])
                 case 'deriv':
                     # 2nd derivative approximation
                     smoothness_penalty = np.sum(
@@ -918,7 +920,8 @@ class SplevBezier(ParametricCurve):
                 'maxiter': 1000,
                 'disp': verbose,
                 'ftol': 1e-12,
-                }
+                },
+            constraints=constraints,
         )
 
         if spacing is not None:

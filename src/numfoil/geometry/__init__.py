@@ -1,4 +1,4 @@
-from ..geometry.airfoil import Airfoil, NACA4Airfoil
+from ..geometry.airfoil import NACA4Airfoil
 from ..geometry.geom2d import (
     Point2D,
     Vector2D,

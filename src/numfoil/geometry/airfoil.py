@@ -34,372 +34,20 @@ class AirfoilBase(ABC):
     def lower_surface(self):
         """Returns the lower surface curve"""
 
+    @property
     @abstractmethod
-    def upper_surface_at(
-        self, x: Union[float, np.ndarray]
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """Returns upper airfoil ordinates at the supplied ``x``.
+    def thickness_distribution(self):
+        """Returns the thickness distribution curve"""
 
-        Args:
-            x: Chord-line fraction (0 = LE, 1 = TE)
-
-        """
-
+    @property
     @abstractmethod
-    def lower_surface_at(
-        self, x: Union[float, np.ndarray]
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """Returns lower airfoil ordinates at the supplied ``x``.
-
-        Args:
-            x: Chord-line fraction (0 = LE, 1 = TE)
-        """
-
-    @abstractmethod
-    def camber_at(self, x: Union[float, np.ndarray]) -> np.ndarray:
-        """Returns camber-line points at the supplied ``x``.
-
-        Args:
-            x: Chord-line fraction (0 = LE, 1 = TE)
-        """
+    def camber_line(self):
+        """Returns the lower surface curve"""
 
     @property
     def cambered(self) -> bool:
         """Returns if the current :py:class:`Airfoil` is cambered."""
         raise NotImplementedError
-
-    def plot(self, n_points = 1000):
-        """Plots the airfoil geometry."""
-        x = cosine_spacing(0,1, num=n_points)
-        y_upper = self.upper_surface_at(x)
-        y_lower = self.lower_surface_at(x)
-        y_camber = self.camber_at(x)
-
-        fig, ax = plt.subplots()
-        ax.plot(x, y_upper, label="Upper Surface")
-        ax.plot(x, y_lower, label="Lower Surface")
-        ax.plot(x, y_camber, label="Camber Line")
-        ax.set_aspect("equal", adjustable="box")
-        ax.legend(loc="best")
-
-
-class BezierAirfoil(AirfoilBase):
-    """Unified airfoil class handling points-based airfoils with inconsistent or
-    missing data."""
-
-    def __init__(
-        self,
-        surface_curve: ParametricCurve,
-        name: str = None,
-        description: str = None,
-        # data_points: np.ndarray = None,
-    ):
-        # save the surface spline object
-        self.surface_curve = surface_curve
-        # the original input points, mainly for reference
-        self.data_points = surface_curve.points
-        # the shortened name of the airfoil, usually the filename
-        self.name = name
-        # the full name of the airfoil, usually from the file header
-        self.description = description or name
-
-        self.u_leading_edge = 0.5
-
-    @classmethod
-    def from_control_points(
-        cls,
-        control_points: np.ndarray,
-        name: str = None,
-        description: str = None,
-        # normalize: bool = True,
-        **kwargs
-    ):
-        """Creates an Airfoil object from control points.
-
-        Args:
-            control_points (np.ndarray):
-                Array of airfoil control points.
-            name (str):
-                Name of the airfoil.
-            description (str):
-                Description of the airfoil. (Any additional text)
-            normalize (bool):
-                    Whether to normalize the points before fitting.
-                    Defaults to True.
-        Returns:
-            Airfoil: Airfoil object initialized with input
-        """
-        return cls(
-            SplevCBezier.from_control_points(control_points),
-            name=name,
-            description=description,
-            # data_points=control_points,
-        )
-
-    @classmethod
-    def from_coordinate_array(
-        cls,
-        points: np.ndarray,
-        name: str = None,
-        description: str = None,
-        normalize: bool = True,
-        fit_method: str = "split_u_l",
-        **kwargs: dict
-    ):
-        """Creates an Airfoil object from an array of points.
-
-        Args:
-            points (np.ndarray):
-                Array of airfoil coordinate points.
-
-            name (str):
-                Name of the airfoil.
-
-            description (str):
-                Description of the airfoil. (Any additional text)
-
-            normalize (bool):
-                Whether to normalize the points before fitting.
-                Defaults to True. Keep it True, please.
-                (if set to False, please don't, but also you better be damn sure
-                the coordinates are properly formatted with a proper leading and
-                trailing edge)
-
-        Raises:
-            TypeError: Input must be a numpy array.
-            ValueError: Invalid shape for input array.
-
-        Returns:
-            Airfoil: Airfoil object initialized with input
-        """
-        if not isinstance(points, np.ndarray):
-            raise TypeError("Input must be a numpy array.")
-        if points.shape[1] != 2:
-            raise ValueError("Input array must have shape (n, 2).")
-
-        # To improve the fitting of the new spline, points are resampled from
-        # the normalized bspline
-        if normalize:
-            normalized_bspline = AirfoilNormalizer.normalize(points)
-            points = normalized_bspline.evaluate_at(
-                np.hstack([
-                    cosine_spacing(0, normalized_bspline.u_leading_edge, num=100),
-                    cosine_spacing(normalized_bspline.u_leading_edge, 1, num=100)[1:],
-                ])
-            )
-
-        match fit_method:
-            case "full":
-                # Use the composite bezier class to fit the entire curve at once
-                surfacespline = SplevCBezier.fit(
-                    points,
-                    kwargs.get("n_control_points", 12),
-                    spacing=kwargs.get("spacing", "linear"),
-                    verbose=False,
-                    w_damping=kwargs.get("w_damping", 1e-3),
-                )
-            case "split_u_l":
-                # split the points in upper and lower and fit those seperatly
-                # prefered method as it is much faster
-                upper = SplevBezier.fit(
-                    points[len(points)//2::-1],
-                    n_control_points=kwargs.get("n_control_points", 12),
-                    spacing=kwargs.get("spacing", "linear"),
-                    verbose=False,
-                    w_damping=kwargs.get("w_damping", 1e-1),
-                    method="SLSQP",
-                    start_clamp=kwargs.get("start_clamp", '0'),
-                    end_clamp=kwargs.get("end_clamp", '0')
-                )
-                lower = SplevBezier.fit(
-                    points[len(points)//2:],
-                    n_control_points=kwargs.get("n_control_points", 12),
-                    spacing=kwargs.get("spacing", "linear"),
-                    verbose=False,
-                    w_damping=kwargs.get("w_damping", 1e-1),
-                    method="SLSQP",
-                    start_clamp=kwargs.get("start_clamp", '0'),
-                    end_clamp=kwargs.get("end_clamp", '0')
-                )
-                surfacespline = SplevCBezier.from_control_points(
-                    np.vstack([
-                        upper.control_points.round(6)[::-1],
-                        lower.control_points.round(6)[1:]
-                    ])
-                )
-            case "split_t_c":
-                raise NotImplementedError
-
-
-        # add original points again for reference
-        surfacespline.data_points = normalized_bspline.points
-
-        return cls(
-            surfacespline,
-            name=name,
-            description=description,
-            # data_points=new_points,
-        )
-
-    @classmethod
-    def from_file(
-        cls,
-        filepath: str,
-        normalize: bool = True,
-        data_type: str = "coordinates",
-        **kwargs: dict
-    ):
-        """Returns an Airfoil object from a data file.
-        Coordinates are normalized before passing to the Airfoil object.
-
-        Includes setting the name and full name of the airfoil based on the
-        filename and header, respectively.
-
-        Args:
-            filepath (str): path to the data file.
-
-        Returns:
-            Airfoil: Airfoil object initialized with data from file.
-        """
-        datafile = AirfoilDataFile(filepath)
-        match data_type:
-            case "coordinates":
-                return cls.from_coordinate_array(
-                    datafile.points,
-                    name=datafile.filename,
-                    description=datafile.header,
-                    normalize=normalize,
-                    **kwargs
-                )
-            case "control_points":
-                return cls.from_control_points(
-                    datafile.points,
-                    name=datafile.filename,
-                    description=datafile.header,
-                    **kwargs,
-                )
-            case _:
-                raise ValueError(f"Unknown data type: {data_type}")
-
-    @classmethod
-    def from_camber_thickness(
-        cls,
-        thickness_curve: ParametricCurve | np.ndarray,
-        camber_curve: ParametricCurve | np.ndarray,
-        name: str = None,
-        description: str = None
-    ) -> "BezierAirfoil":
-        """
-        Construct airfoil from camber and thickness distributions.
-
-        Args:
-            camber_curve (ParametricCurve): Bezier curve for camber line.
-            thickness_curve (ParametricCurve): Bezier curve for thickness distribution.
-            name (str): Optional name of airfoil.
-            description (str): Optional long description.
-
-        Returns:
-            BezierAirfoil: New instance created from camber + thickness curves.
-        """
-        if not isinstance(camber_curve, type(thickness_curve)):
-            raise TypeError("Camber and thickness curves must be of the same type (curve object or array).")
-
-        if isinstance(camber_curve, ParametricCurve) and isinstance(thickness_curve, ParametricCurve):
-            # Ensure x-coordinates align
-            x_camber = camber_curve.control_points[:, 0]
-            y_camber = camber_curve.control_points[:, 1]
-            x_thickness = thickness_curve.control_points[:, 0]
-            y_thickness = thickness_curve.control_points[:, 1]
-        else:
-            # Assume they are numpy arrays
-            x = camber_curve[:, 0]
-            y_camber = camber_curve[:, 1]
-            x_thickness = thickness_curve[:, 0]
-            y_thickness = thickness_curve[:, 1]
-
-        if not np.all(x_camber == x_thickness):
-            raise ValueError("Camber and thickness curves must have the same x-coordinates.")
-
-        # Reconstruct upper/lower surface control points
-        y_upper = y_camber + 0.5 * y_thickness
-        y_lower = y_camber - 0.5 * y_thickness
-
-        upper_cp = np.column_stack([x[::-1], y_upper[::-1]])  # Reverse for trailing → leading
-        lower_cp = np.column_stack([x[1:], y_lower[1:]])      # Skip duplicate LE point
-
-        # Combine to single surface curve (just like your other logic)
-        control_points = np.vstack([upper_cp, lower_cp])
-
-        surface_curve = SplevBezier(control_points)
-
-        # Attach original components for reference if needed
-        surface_curve.camber_curve = camber_curve
-        surface_curve.thickness_curve = thickness_curve
-
-        return cls(
-            surface_curve,
-            name=name,
-            description=description,
-        )
-
-    @property
-    def surface(self) -> ParametricCurve:
-        """Returns a parametric surface curve representing the entire airfoil."""
-        return self.surface_curve
-
-    @cached_property
-    def upper_surface(self) -> ParametricCurve:
-        return SplevBezier(
-            self.surface.control_points[self.surface.n_control_points//2::-1]
-        )
-
-    @cached_property
-    def lower_surface(self) -> ParametricCurve:
-        return SplevBezier(
-            self.surface.control_points[self.surface.n_control_points//2:]
-        )
-
-    @cached_property
-    def camber_line(self) -> ParametricCurve:
-        """Returns the curve object for the camber line of the airfoil.
-
-        The camber line curve is obtained by placing control points midway
-        between the upper and lower control points of the airfoil surface.
-
-        Previously this was done by evaluating the upper and lower surfaces,
-        finding the midpoints defining the camber line, and fitting a curve
-        through these points. Using the control points already available
-        simplifies the process.
-
-        Returns:
-            ParametricCurve : The camber line object of the airfoil.
-        """
-        # y_upper = self.upper_surface_at(cosine_spacing(0, 1, 1000))
-        # y_lower = self.lower_surface_at(cosine_spacing(0, 1, 1000))
-        # y_camber = 0.5 * (y_upper + y_lower)
-        # return SplevBezier.fit(
-        #     np.column_stack([x, y_camber])
-        # )
-        camber_control_points = np.column_stack([
-            self.upper_surface.control_points[:,0],
-            0.5 * (
-                self.upper_surface.control_points[:,1] +
-                self.lower_surface.control_points[:,1]
-                )
-        ])
-        return SplevBezier(camber_control_points)
-
-    @cached_property
-    def thickness_distribution(self) -> ParametricCurve:
-        """Returns the thickness distribution of the airfoil."""
-        thickness_control_points = np.column_stack([
-            self.upper_surface.control_points[:,0],
-            (
-                self.upper_surface.control_points[:,1] -
-                self.lower_surface.control_points[:,1]
-            )
-        ])
-        return SplevBezier(thickness_control_points)
 
     @cached_property
     def upper_surface_at(self) -> si.PchipInterpolator:
@@ -416,7 +64,7 @@ class BezierAirfoil(AirfoilBase):
             interpolator results: upper surface y ordinate at x.
         """
         points = self.upper_surface.evaluate_at(
-            cosine_spacing(0, 1, num=2000)
+            cosine_spacing(0, 1, num=1000)
         )
         # filter out all points with non-increasing x-coordinates
         # this prevents a lot of headaches
@@ -439,7 +87,7 @@ class BezierAirfoil(AirfoilBase):
             float, np.ndarray: lower surface y ordinate at x. (interpolator results)
         """
         points = self.lower_surface.evaluate_at(
-            cosine_spacing(0, 1, num=2000)
+            cosine_spacing(0, 1, num=1000)
         )
         x, y = points[points[:, 0] == np.maximum.accumulate(points[:, 0])].T
         assert np.all(np.diff(x) > 0)
@@ -460,7 +108,7 @@ class BezierAirfoil(AirfoilBase):
             float, np.ndarray: camber line y ordinate at x. (interpolator results)
         """
         points = self.camber_line.evaluate_at(
-            cosine_spacing(0, 1, num=2000)
+            cosine_spacing(0, 1, num=500)
         )
         x, y = points[points[:, 0] == np.maximum.accumulate(points[:, 0])].T
         assert np.all(np.diff(x) > 0)
@@ -616,6 +264,676 @@ class BezierAirfoil(AirfoilBase):
         return np.arctan2(
             *self.leading_edge_vector
         )
+
+    def plot(self, n_points = 1000):
+        """Plots the airfoil geometry."""
+        x = cosine_spacing(0,1, num=n_points)
+
+        fig, ax = plt.subplots()
+        ax.plot(x, self.upper_surface_at(x), label="Upper Surface")
+        ax.plot(x, self.lower_surface_at(x), label="Lower Surface")
+        ax.plot(x, self.camber_at(x), label="Camber Line")
+        ax.set_title(self.description or self.name or "Airfoil")
+        ax.set_aspect("equal", adjustable="box")
+        ax.legend(loc="best")
+        return fig, ax
+
+
+class BsplineAirfoil(AirfoilBase):
+    """Unified airfoil class handling points-based airfoils with inconsistent or
+    missing data."""
+
+    def __init__(
+        self,
+        surface_curve: ParametricCurve,
+        name: str = None,
+        description: str = None,
+        # data_points: np.ndarray = None,
+    ):
+        # save the surface spline object
+        self.surface_curve = surface_curve
+        # the original input points, mainly for reference
+        self.data_points = surface_curve.points
+        # the shortened name of the airfoil, usually the filename
+        self.name = name
+        # the full name of the airfoil, usually from the file header
+        self.description = description or name
+
+        self.u_leading_edge = 0.5
+
+    @classmethod
+    def from_coordinate_array(
+        cls,
+        points: np.ndarray,
+        name: str = None,
+        description: str = None,
+        normalize: bool = True,
+    ):
+        """Creates an Airfoil object from an array of points.
+
+        Args:
+            points (np.ndarray):
+                Array of airfoil coordinate points.
+
+            name (str):
+                Name of the airfoil.
+
+            description (str):
+                Description of the airfoil. (Any additional text)
+
+            normalize (bool):
+                Whether to normalize the points before fitting.
+                Defaults to True. Keep it True, please.
+                (if set to False, please don't, but also you better be damn sure
+                the coordinates are properly formatted with a proper leading and
+                trailing edge)
+
+        Raises:
+            TypeError: Input must be a numpy array.
+            ValueError: Invalid shape for input array.
+
+        Returns:
+            Airfoil: Airfoil object initialized with input
+        """
+        if not isinstance(points, np.ndarray):
+            raise TypeError("Input must be a numpy array.")
+        if points.shape[1] != 2:
+            raise ValueError("Input array must have shape (n, 2).")
+
+        # surface_spline = (
+        #     AirfoilNormalizer.normalize(points) if normalize
+        #     else BSpline2D(points)
+        # )
+
+        return cls(
+            AirfoilNormalizer.normalize(points) if normalize else BSpline2D(points),
+            name=name,
+            description=description,
+            # data_points=new_points,
+        )
+
+    @classmethod
+    def from_file(
+        cls,
+        filepath: str,
+        normalize: bool = True,
+    ):
+        """Returns an Airfoil object from a data file.
+        Coordinates are normalized before passing to the Airfoil object.
+
+        Includes setting the name and full name of the airfoil based on the
+        filename and header, respectively.
+
+        Args:
+            filepath (str): path to the data file.
+            normalize (bool): Whether to normalize the points before fitting.
+                Defaults to True. Please, don't change it.
+            kwargs (dict): Additional arguments for the fitting method.
+
+        Returns:
+            Airfoil: Airfoil object initialized with data from file.
+        """
+        datafile = AirfoilDataFile(filepath)
+        return cls.from_coordinate_array(
+            datafile.points,
+            name=datafile.filename,
+            description=datafile.header,
+            normalize=normalize,
+        )
+
+    @classmethod
+    def from_camber_thickness(
+        cls,
+        thickness_curve: ParametricCurve | np.ndarray,
+        camber_curve: ParametricCurve | np.ndarray,
+        name: str = None,
+        description: str = None
+    ) -> "BsplineAirfoil":
+        """
+        Construct airfoil from camber and thickness distributions.
+
+        Args:
+            camber_curve (ParametricCurve): Bezier curve for camber line.
+            thickness_curve (ParametricCurve): Bezier curve for thickness distribution.
+            name (str): Optional name of airfoil.
+            description (str): Optional long description.
+
+        Returns:
+            BezierAirfoil: New instance created from camber + thickness curves.
+        """
+        if not isinstance(camber_curve, type(thickness_curve)):
+            raise TypeError("Camber and thickness curves must be of the same type (curve object or array).")
+
+        if isinstance(camber_curve, np.ndarray) and isinstance(thickness_curve, np.ndarray) \
+            and camber_curve[:,1] != thickness_curve[:,1]:
+            camber_curve = BSpline2D(camber_curve)
+            thickness_curve = BSpline2D(thickness_curve)
+
+        # Bsplines are parametric, so interpolation is needed to ensure x-coordinates align
+        x_vals = cosine_spacing(0, 1, num=200)
+        camber_points = np.columnstack([
+            x_vals,
+            si.PchipInterpolator(
+                *camber_curve.evaluate_at(x_vals).T,
+                extrapolate=False
+            )(x_vals)
+        ])
+        half_thickness_points = np.columnstack([
+            x_vals,
+            si.PchipInterpolator(
+                *thickness_curve.evaluate_at(x_vals).T,
+                extrapolate=False
+            )(x_vals)/2
+        ])
+        surface_curve = BSpline2D(
+            np.vstack([
+                (camber_points + half_thickness_points)[::-1],
+                (camber_points - half_thickness_points)[1:]
+            ])
+        )
+        obj = cls(
+            surface_curve,
+            name=name,
+            description=description,
+        )
+        obj.thickness_distribution = thickness_curve
+        obj.camber_line = camber_curve
+        return obj
+
+    @property
+    def surface(self) -> ParametricCurve:
+        """Returns a parametric surface curve representing the entire airfoil."""
+        return self.surface_curve
+
+    @cached_property
+    def upper_surface(self) -> ParametricCurve:
+        """Returns the Bspline curve object for the upper surface of the airfoil.
+
+        Returns:
+            ParametricCurve: The upper surface Bspline object of the airfoil.
+        """
+        return BSpline2D(
+            self.surface.evaluate_at(
+                cosine_spacing(0, self.surface.u_leading_edge, num=100)[::-1]
+            )
+        )
+
+    @cached_property
+    def lower_surface(self) -> ParametricCurve:
+        """Returns the Bspline curve object for the lower surface of the airfoil.
+
+        Returns:
+            ParametricCurve: The lower surface Bspline object of the airfoil.
+        """
+        return BSpline2D(
+            self.surface.evaluate_at(
+                cosine_spacing(self.surface.u_leading_edge, 1, num=100)
+            )
+        )
+
+    @cached_property
+    def camber_line(self) -> ParametricCurve:
+        """Returns the curve object for the camber line of the airfoil.
+
+        The camber line curve is obtained by placing control points midway
+        between the upper and lower control points of the airfoil surface.
+
+        Previously this was done by evaluating the upper and lower surfaces,
+        finding the midpoints defining the camber line, and fitting a curve
+        through these points. Using the control points already available
+        simplifies the process.
+
+        Returns:
+            ParametricCurve : The camber line object of the airfoil.
+        """
+        x = cosine_spacing(0, 1, 200)
+        y_upper = self.upper_surface_at(x)
+        y_lower = self.lower_surface_at(x)
+        y_camber = 0.5 * (y_upper + y_lower)
+        return BSpline2D(
+            np.column_stack([x, y_camber])
+        )
+
+    @cached_property
+    def thickness_distribution(self) -> ParametricCurve:
+        """Returns the thickness distribution of the airfoil."""
+        x = cosine_spacing(0, 1, 200)
+        y_upper = self.upper_surface_at(x)
+        y_lower = self.lower_surface_at(x)
+        thickness = (y_upper - y_lower)
+        return BSpline2D(
+            np.column_stack([x, thickness])
+        )
+
+
+class BezierAirfoil(AirfoilBase):
+    """Unified airfoil class handling points-based airfoils with inconsistent or
+    missing data."""
+
+    def __init__(
+        self,
+        surface_curve: ParametricCurve,
+        name: str = None,
+        description: str = None,
+        # data_points: np.ndarray = None,
+    ):
+        # save the surface spline object
+        self.surface_curve = surface_curve
+        # the original input points, mainly for reference
+        # self.data_points = surface_curve.points
+        # the shortened name of the airfoil, usually the filename
+        self.name = name
+        # the full name of the airfoil, usually from the file header
+        self.description = description or name
+
+        self.u_leading_edge = 0.5
+
+    @classmethod
+    def from_control_points(
+        cls,
+        control_points: np.ndarray,
+        name: str = None,
+        description: str = None,
+        # normalize: bool = True,
+        **kwargs
+    ):
+        """Creates an Airfoil object from control points.
+
+        Args:
+            control_points (np.ndarray):
+                Array of airfoil control points.
+            name (str):
+                Name of the airfoil.
+            description (str):
+                Description of the airfoil. (Any additional text)
+            normalize (bool):
+                    Whether to normalize the points before fitting.
+                    Defaults to True.
+        Returns:
+            Airfoil: Airfoil object initialized with input
+        """
+        return cls(
+            SplevCBezier.from_control_points(control_points),
+            name=name,
+            description=description,
+            # data_points=control_points,
+        )
+
+    @classmethod
+    def from_coordinate_array(
+        cls,
+        points: np.ndarray,
+        name: str = None,
+        description: str = None,
+        normalize: bool = True,
+        fit_method: str = "split_u_l",
+        **kwargs: dict
+    ):
+        """Creates an Airfoil object from an array of points.
+
+        Args:
+            points (np.ndarray):
+                Array of airfoil coordinate points.
+
+            name (str):
+                Name of the airfoil.
+
+            description (str):
+                Description of the airfoil. (Any additional text)
+
+            normalize (bool):
+                Whether to normalize the points before fitting.
+                Defaults to True. Keep it True, please.
+                (if set to False, please don't, but also you better be damn sure
+                the coordinates are properly formatted with a proper leading and
+                trailing edge)
+
+            fit_method (str):
+                Method to fit the airfoil. Options are:
+                - "full": Fit the entire curve at once.
+                - "split_u_l": Split the points into upper and lower and fit
+                    those separately. Preferred method as it is much faster.
+                - "split_t_c": First determine camber and thickness values, then
+                    fit bezier curves to those.
+                Defaults to "split_u_l".
+                The main reason for this is to allow for different constraints,
+                and fitting two curves separately is much faster than fitting
+                one big one.
+
+            kwargs (dict):
+                Additional arguments for the fitting method.
+
+
+        Raises:
+            TypeError: Input must be a numpy array.
+            ValueError: Invalid shape for input array.
+
+        Returns:
+            Airfoil: Airfoil object initialized with input
+        """
+        if not isinstance(points, np.ndarray):
+            raise TypeError("Input must be a numpy array.")
+        if points.shape[1] != 2:
+            raise ValueError("Input array must have shape (n, 2).")
+
+        # To improve the fitting of the new spline, points are resampled from
+        # the normalized bspline
+        if normalize:
+            normalized_bspline = AirfoilNormalizer.normalize(points)
+            points = normalized_bspline.evaluate_at(
+                np.hstack([
+                    cosine_spacing(0, normalized_bspline.u_leading_edge, num=100),
+                    cosine_spacing(normalized_bspline.u_leading_edge, 1, num=100)[1:],
+                ])
+            )
+
+        # TODO : clean this up, there must be a better way than this mess...
+        match fit_method:
+            case "full":
+                # Use the composite bezier class to fit the entire curve at once
+                surfacespline = SplevCBezier.fit(
+                    points,
+                    kwargs.get("n_control_points", 12),
+                    spacing=kwargs.get("spacing", "linear"),
+                    verbose=False,
+                    w_damping=kwargs.get("w_damping", 1e-3),
+                )
+                airfoil = cls(
+                    surfacespline,
+                    name=name,
+                    description=description,
+                )
+            case "split_u_l":
+                # split the points in upper and lower and fit those seperatly
+                # prefered method as it is much faster
+                upper = SplevBezier.fit(
+                    points[len(points)//2::-1],
+                    n_control_points=kwargs.get("n_control_points", None),
+                    spacing=kwargs.get("spacing", np.linspace(0,1,kwargs.get("n_control_points", 13)+1)[:-1]),
+                    start_clamp='origin',
+                    end_clamp=np.array([1.0, kwargs.get("trailing_edge_thickness", 0.0005)/2]),
+                    damping_type=kwargs.get("damping_type", "deriv"),
+                    w_damping=kwargs.get("w_damping", 1e-1),
+                    method="SLSQP",
+                    verbose=kwargs.get("verbose", False),
+                    constraints=[
+                        {   # ensure all control points have positive y-values
+                            "type": "ineq",
+                            "fun": lambda y: y
+                        },
+                    ]
+                )
+                lower = SplevBezier.fit(
+                    points[len(points)//2:],
+                    n_control_points=kwargs.get("n_control_points", None),
+                    spacing=kwargs.get("spacing", np.linspace(0,1,kwargs.get("n_control_points", 13)+1)[:-1]),
+                    start_clamp='origin',
+                    end_clamp=np.array([1.0, -kwargs.get("trailing_edge_thickness", 0.0005)/2]),
+                    damping_type=kwargs.get("damping_type", "deriv"),
+                    w_damping=kwargs.get("w_damping", 1e-1),
+                    method="SLSQP",
+                    verbose=kwargs.get("verbose", False),
+                    constraints=[
+                        {   # ensure all control points have negative y-values
+                            "type": "ineq",
+                            "fun": lambda y: -y
+                        },
+                    ]
+                )
+                surfacespline = SplevCBezier.from_control_points(
+                    np.vstack([
+                        upper.control_points.round(6)[::-1],
+                        lower.control_points.round(6)[1:]
+                    ])
+                )
+                surfacespline.points = points
+                airfoil = cls(
+                    surfacespline,
+                    name=name,
+                    description=description,
+                )
+                airfoil.upper_surface = upper
+                airfoil.lower_surface = lower
+                return airfoil
+
+            case "split_t_c":
+                bspline_airfoil = BsplineAirfoil(normalized_bspline)
+                thickness_pts = bspline_airfoil.thickness_distribution.evaluate_at(
+                    cosine_spacing(0, 1, num=200)
+                )
+                thickness_distribution = SplevBezier.fit(
+                    thickness_pts,
+                    n_control_points=kwargs.get("n_control_points", None),
+                    spacing=kwargs.get(
+                        "spacing",
+                        np.linspace(0,1,kwargs.get("n_control_points", 13)+1)[:-1]
+                    ),
+                    start_clamp='origin',
+                    end_clamp=np.array([1.0, kwargs.get("trailing_edge_thickness", 0.0005)]),
+                    damping_type=kwargs.get("damping_type", "deriv"),
+                    w_damping=kwargs.get("w_damping", 1e-1),
+                    verbose=kwargs.get("verbose", False),
+                    constraints=[
+                        {   # ensure all control points have positive y-values
+                            "type": "ineq",
+                            "fun": lambda y: y
+                        },
+                    ]
+                )
+                camber_pts = bspline_airfoil.camber_line.evaluate_at(
+                    cosine_spacing(0, 1, num=200)
+                )
+                camber_curve = SplevBezier.fit(
+                    camber_pts,
+                    n_control_points=kwargs.get("n_control_points", None),
+                    spacing=kwargs.get(
+                        "spacing",
+                        np.linspace(0,1,kwargs.get("n_control_points", 13)+1)[:-1]
+                    ),
+                    start_clamp='origin',
+                    end_clamp=np.array([1.0, 0.0]),
+                    damping_type=kwargs.get("damping_type", "deriv"),
+                    w_damping=kwargs.get("w_damping", 1e-1),
+                    verbose=kwargs.get("verbose", False),
+                )
+                return cls.from_camber_thickness(
+                    thickness_distribution,
+                    camber_curve,
+                    name=name,
+                    description=description,
+                    points=points,
+                )
+            case _:
+                raise ValueError(f"Unknown fit method: {fit_method}")
+        # add original points again for reference
+        # surfacespline.data_points = normalized_bspline.points
+
+        # return cls(
+        #     surfacespline,
+        #     name=name,
+        #     description=description,
+        #     # data_points=new_points,
+        # )
+
+    @classmethod
+    def from_file(
+        cls,
+        filepath: str,
+        normalize: bool = True,
+        data_type: str = "coordinates",
+        **kwargs: dict
+    ):
+        """Returns an Airfoil object from a data file.
+        Coordinates are normalized before passing to the Airfoil object.
+
+        Includes setting the name and full name of the airfoil based on the
+        filename and header, respectively.
+
+        Args:
+            filepath (str): path to the data file.
+
+        Returns:
+            Airfoil: Airfoil object initialized with data from file.
+        """
+        datafile = AirfoilDataFile(filepath)
+        match data_type:
+            case "coordinates":
+                return cls.from_coordinate_array(
+                    datafile.points,
+                    name=datafile.filename,
+                    description=datafile.header,
+                    normalize=normalize,
+                    **kwargs
+                )
+            case "control_points":
+                return cls.from_control_points(
+                    datafile.points,
+                    name=datafile.filename,
+                    description=datafile.header,
+                    **kwargs,
+                )
+            case _:
+                raise ValueError(f"Unknown data type: {data_type}")
+
+    @classmethod
+    def from_camber_thickness(
+        cls,
+        thickness_curve: ParametricCurve | np.ndarray,
+        camber_curve: ParametricCurve | np.ndarray,
+        name: str = None,
+        description: str = None,
+        points: np.ndarray = None,
+    ) -> "BezierAirfoil":
+        """
+        Construct airfoil from camber and thickness distributions.
+
+        Args:
+            camber_curve (ParametricCurve): Bezier curve for camber line.
+            thickness_curve (ParametricCurve): Bezier curve for thickness distribution.
+            name (str): Optional name of airfoil.
+            description (str): Optional long description.
+
+        Returns:
+            BezierAirfoil: New instance created from camber + thickness curves.
+        """
+        if not isinstance(camber_curve, type(thickness_curve)):
+            raise TypeError("Camber and thickness curves must be of the same type (curve object or array).")
+
+        if isinstance(camber_curve, ParametricCurve) and isinstance(thickness_curve, ParametricCurve):
+            # Ensure x-coordinates align
+            x_camber = camber_curve.control_points[:, 0]
+            y_camber = camber_curve.control_points[:, 1]
+            x_thickness = thickness_curve.control_points[:, 0]
+            y_thickness = thickness_curve.control_points[:, 1]
+        else:
+            # Assume they are numpy arrays
+            x_camber = camber_curve[:, 0]
+            y_camber = camber_curve[:, 1]
+            x_thickness = thickness_curve[:, 0]
+            y_thickness = thickness_curve[:, 1]
+
+        if not np.all(x_camber == x_thickness):
+            raise ValueError("Camber and thickness curves must have the same x-coordinates.")
+        else:
+            x = x_camber
+
+        assert np.all(x_camber == x_thickness), \
+            "Camber and thickness curves must have the same x-coordinates."
+
+        # Reconstruct upper/lower surface control points
+        y_upper = y_camber + 0.5 * y_thickness
+        y_lower = y_camber - 0.5 * y_thickness
+
+        upper_cp = np.column_stack([x[::-1], y_upper[::-1]])  # Reverse for trailing → leading
+        lower_cp = np.column_stack([x[1:], y_lower[1:]])      # Skip duplicate LE point
+
+        # Combine to single surface curve (just like your other logic)
+        control_points = np.vstack([upper_cp, lower_cp])
+
+        surface_curve = SplevCBezier.from_control_points(control_points)
+        surface_curve.points = points
+
+        # Attach original components for reference if needed
+        # surface_curve.camber_curve = camber_curve
+        # surface_curve.thickness_curve = thickness_curve
+
+        airfoil = cls(
+            surface_curve,
+            name=name,
+            description=description,
+        )
+        airfoil.thickness_distribution = thickness_curve
+        airfoil.camber_line = camber_curve
+        return airfoil
+
+        # return cls(
+        #     surface_curve,
+        #     name=name,
+        #     description=description,
+        # )
+
+    @property
+    def surface(self) -> ParametricCurve:
+        """Returns a parametric surface curve representing the entire airfoil."""
+        return self.surface_curve
+
+    @cached_property
+    def upper_surface(self) -> ParametricCurve:
+        return SplevBezier(
+            self.surface.control_points[self.surface.n_control_points//2::-1]
+        )
+
+    @cached_property
+    def lower_surface(self) -> ParametricCurve:
+        return SplevBezier(
+            self.surface.control_points[self.surface.n_control_points//2:]
+        )
+
+    @cached_property
+    def camber_line(self) -> ParametricCurve:
+        """Returns the curve object for the camber line of the airfoil.
+
+        The camber line curve is obtained by placing control points midway
+        between the upper and lower control points of the airfoil surface.
+
+        Previously this was done by evaluating the upper and lower surfaces,
+        finding the midpoints defining the camber line, and fitting a curve
+        through these points. Using the control points already available
+        simplifies the process.
+
+        Returns:
+            ParametricCurve : The camber line object of the airfoil.
+        """
+        # y_upper = self.upper_surface_at(cosine_spacing(0, 1, 1000))
+        # y_lower = self.lower_surface_at(cosine_spacing(0, 1, 1000))
+        # y_camber = 0.5 * (y_upper + y_lower)
+        # return SplevBezier.fit(
+        #     np.column_stack([x, y_camber])
+        # )
+        camber_control_points = np.column_stack([
+            self.upper_surface.control_points[:,0],
+            0.5 * (
+                self.upper_surface.control_points[:,1] +
+                self.lower_surface.control_points[:,1]
+                )
+        ])
+        return SplevBezier(camber_control_points)
+
+    @cached_property
+    def thickness_distribution(self) -> ParametricCurve:
+        """Returns the thickness distribution of the airfoil."""
+        assert np.all(
+            self.upper_surface.control_points.x == self.lower_surface.control_points.x
+        )
+        thickness_control_points = np.column_stack([
+            self.upper_surface.control_points[:,0],
+            (
+                self.upper_surface.control_points[:,1] -
+                self.lower_surface.control_points[:,1]
+            )
+        ])
+        return SplevBezier(thickness_control_points)
+
 
 class CSTAirfoil(AirfoilBase):
     def __init__(
@@ -818,98 +1136,6 @@ class CSTAirfoil(AirfoilBase):
             raise RuntimeError("Failed to find maximum camber.")
 
 
-class Airfoil(AirfoilBase):
-    def __init__(
-        self,
-        data_points: np.ndarray,
-        surface: Curve = None,
-        upper_surface: Curve = None,
-        lower_surface: Curve = None,
-        name: str = None,
-        full_name: str = None,
-    ):
-        # the original input points, only for reference
-        self.data_points = data_points
-
-        # curve definition of the airfoil geometry
-        self.surface = surface              # the entire airfoil in a single curve
-        self.upper_surface = upper_surface  # the upper surface curve
-        self.lower_surface = lower_surface  # the lower surface curve
-
-        # the shortened name of the airfoil, usually the filename
-        self.name = name
-        # the full name of the airfoil, usually from the file header
-        self.full_name = full_name or name
-
-
-    @classmethod
-    def from_points(
-        cls,
-        points: np.ndarray,
-        curve_type: str = "bezier",
-        name: str = None,
-    ):
-        spline = AirfoilNormalizer.normalize(points)
-        upper_points = spline.evaluate_at(
-            cosine_spacing(0, spline.u_leading_edge, num=100)
-        )
-
-        match curve_type:
-            case "bezier":
-                surface = SplevBezier(spline)
-            case "cst":
-                surface = CSTCurve.fit(spline)
-            case _:
-                raise ValueError(f"Unknown curve type: {curve_type}")
-
-    @classmethod
-    def from_file(
-        cls,
-        filepath: str,
-
-    ):
-        """Returns an Airfoil object from a data file.
-        Coordinates are normalized before passing to the Airfoil object.
-
-        Args:
-            filepath (str): path to the data file.
-
-        Returns:
-            Airfoil: Airfoil object initialized with data from file.
-        """
-        datafile = AirfoilDataFile(filepath)
-
-    @cached_property
-    def surface(self) -> ParametricCurve:
-        return self.surface_class.fit(self.data_points)
-
-    @cached_property
-    def upper_surface(self) -> CSTCurve:
-        return CSTCurve.fit(self.data_points[:len(self.data_points) // 2][::-1])
-
-    @cached_property
-    def lower_surface(self) -> CSTCurve:
-        return CSTCurve.fit(self.data_points[len(self.data_points) // 2:])
-
-    @cached_property
-    def upper_surface_at(self) -> si.PchipInterpolator:
-        """Interpolator for upper surface spline.
-        Returns upper airfoil ordinates at the supplied ``x``.
-
-        Args:
-            x (float, np.ndarray): Chord-line fraction (0 = LE, 1 = TE)
-
-        Returns:
-            interpolator results: upper surface y ordinate at x.
-        """
-        return self.upper_surface.evaluate_at
-
-    @cached_property
-    def lower_surface_at(self) -> si.PchipInterpolator:
-        """Interpolator for upper surface spline.
-        Returns upper airfoil ordinates"""
-
-
-class NACA4Airfoil(Airfoil):
+class NACA4Airfoil(AirfoilBase):
     def __init__(self):
         pass
