@@ -64,13 +64,13 @@ class AirfoilBase(ABC):
             interpolator results: upper surface y ordinate at x.
         """
         points = self.upper_surface.evaluate_at(
-            cosine_spacing(0, 1, num=1000)
+            cosine_spacing(0, 1, num=200)
         )
         # filter out all points with non-increasing x-coordinates
         # this prevents a lot of headaches
         x, y = points[points[:, 0] == np.maximum.accumulate(points[:, 0])].T
         assert np.all(np.diff(x) > 0)
-        return si.PchipInterpolator(x, y, extrapolate=False)
+        return si.PchipInterpolator(x, y, extrapolate=True)
 
     @cached_property
     def lower_surface_at(self) -> si.PchipInterpolator:
@@ -87,11 +87,11 @@ class AirfoilBase(ABC):
             float, np.ndarray: lower surface y ordinate at x. (interpolator results)
         """
         points = self.lower_surface.evaluate_at(
-            cosine_spacing(0, 1, num=1000)
+            cosine_spacing(0, 1, num=200)
         )
         x, y = points[points[:, 0] == np.maximum.accumulate(points[:, 0])].T
         assert np.all(np.diff(x) > 0)
-        return si.PchipInterpolator(x, y, extrapolate=False)
+        return si.PchipInterpolator(x, y, extrapolate=True)
 
     @cached_property
     def camber_line_at(self) -> si.PchipInterpolator:
@@ -108,11 +108,11 @@ class AirfoilBase(ABC):
             float, np.ndarray: camber line y ordinate at x. (interpolator results)
         """
         points = self.camber_line.evaluate_at(
-            cosine_spacing(0, 1, num=500)
+            cosine_spacing(0, 1, num=100)
         )
         x, y = points[points[:, 0] == np.maximum.accumulate(points[:, 0])].T
         assert np.all(np.diff(x) > 0)
-        return si.PchipInterpolator(x, y, extrapolate=False)
+        return si.PchipInterpolator(x, y, extrapolate=True)
 
     def camber_at(self, x: Union[float, np.ndarray]) -> np.ndarray:
         """Simply a pointer to the camber_line_at.
@@ -268,7 +268,6 @@ class AirfoilBase(ABC):
     def plot(self, n_points = 1000):
         """Plots the airfoil geometry."""
         x = cosine_spacing(0,1, num=n_points)
-
         fig, ax = plt.subplots()
         ax.plot(x, self.upper_surface_at(x), label="Upper Surface")
         ax.plot(x, self.lower_surface_at(x), label="Lower Surface")
@@ -276,6 +275,7 @@ class AirfoilBase(ABC):
         ax.set_title(self.description or self.name or "Airfoil")
         ax.set_aspect("equal", adjustable="box")
         ax.legend(loc="best")
+        ax.set_ylim(-0.4, 0.4)
         return fig, ax
 
 
@@ -288,12 +288,16 @@ class BsplineAirfoil(AirfoilBase):
         surface_curve: ParametricCurve,
         name: str = None,
         description: str = None,
-        # data_points: np.ndarray = None,
     ):
         # save the surface spline object
         self.surface_curve = surface_curve
-        # the original input points, mainly for reference
-        self.data_points = surface_curve.points
+
+        # # # optional curve definitions
+        # self._upper_surface = upper_surface_curve
+        # self._lower_surface = lower_surface_curve
+        # self._thickness_distribution = thickness_distribution
+        # self._camber_line = camber_line
+
         # the shortened name of the airfoil, usually the filename
         self.name = name
         # the full name of the airfoil, usually from the file header
@@ -415,14 +419,14 @@ class BsplineAirfoil(AirfoilBase):
             x_vals,
             si.PchipInterpolator(
                 *camber_curve.evaluate_at(x_vals).T,
-                extrapolate=False
+                extrapolate=True
             )(x_vals)
         ])
         half_thickness_points = np.columnstack([
             x_vals,
             si.PchipInterpolator(
                 *thickness_curve.evaluate_at(x_vals).T,
-                extrapolate=False
+                extrapolate=True
             )(x_vals)/2
         ])
         surface_curve = BSpline2D(
@@ -452,11 +456,20 @@ class BsplineAirfoil(AirfoilBase):
         Returns:
             ParametricCurve: The upper surface Bspline object of the airfoil.
         """
-        return BSpline2D(
-            self.surface.evaluate_at(
-                cosine_spacing(0, self.surface.u_leading_edge, num=100)[::-1]
+        curve = BSpline2D(
+            AirfoilNormalizer._remove_overshoots(
+                self.surface.evaluate_at(
+                    cosine_spacing(0, self.surface.u_leading_edge, num=100)[::-1]
+                )
             )
         )
+        # force final control point to bet at x=1
+        adjusted_control_points = curve.control_points
+        direction = adjusted_control_points[-1] - adjusted_control_points[-2]
+        magnitude = (1.0 - adjusted_control_points[-1][0]) / direction[0]
+        adjusted_control_points[-1] += magnitude * direction
+        curve.control_points = adjusted_control_points
+        return curve
 
     @cached_property
     def lower_surface(self) -> ParametricCurve:
@@ -465,11 +478,20 @@ class BsplineAirfoil(AirfoilBase):
         Returns:
             ParametricCurve: The lower surface Bspline object of the airfoil.
         """
-        return BSpline2D(
-            self.surface.evaluate_at(
-                cosine_spacing(self.surface.u_leading_edge, 1, num=100)
+        curve = BSpline2D(
+            AirfoilNormalizer._remove_overshoots(
+                self.surface.evaluate_at(
+                    cosine_spacing(self.surface.u_leading_edge, 1, num=100)
+                )
             )
         )
+        # force final control point to bet at x=1
+        adjusted_control_points = curve.control_points
+        direction = adjusted_control_points[-1] - adjusted_control_points[-2]
+        magnitude = (1.0 - adjusted_control_points[-1][0]) / direction[0]
+        adjusted_control_points[-1] += magnitude * direction
+        curve.control_points = adjusted_control_points
+        return curve
 
     @cached_property
     def camber_line(self) -> ParametricCurve:
@@ -515,12 +537,10 @@ class BezierAirfoil(AirfoilBase):
         surface_curve: ParametricCurve,
         name: str = None,
         description: str = None,
-        # data_points: np.ndarray = None,
     ):
         # save the surface spline object
         self.surface_curve = surface_curve
-        # the original input points, mainly for reference
-        # self.data_points = surface_curve.points
+
         # the shortened name of the airfoil, usually the filename
         self.name = name
         # the full name of the airfoil, usually from the file header
@@ -620,11 +640,13 @@ class BezierAirfoil(AirfoilBase):
         # the normalized bspline
         if normalize:
             normalized_bspline = AirfoilNormalizer.normalize(points)
-            points = normalized_bspline.evaluate_at(
-                np.hstack([
-                    cosine_spacing(0, normalized_bspline.u_leading_edge, num=100),
-                    cosine_spacing(normalized_bspline.u_leading_edge, 1, num=100)[1:],
-                ])
+            points = AirfoilNormalizer._remove_overshoots(
+                normalized_bspline.evaluate_at(
+                    np.hstack([
+                        cosine_spacing(0, normalized_bspline.u_leading_edge, num=100),
+                        cosine_spacing(normalized_bspline.u_leading_edge, 1, num=100)[1:],
+                    ])
+                )
             )
 
         # TODO : clean this up, there must be a better way than this mess...
@@ -638,7 +660,7 @@ class BezierAirfoil(AirfoilBase):
                     verbose=False,
                     w_damping=kwargs.get("w_damping", 1e-3),
                 )
-                airfoil = cls(
+                return cls(
                     surfacespline,
                     name=name,
                     description=description,
@@ -649,17 +671,21 @@ class BezierAirfoil(AirfoilBase):
                 upper = SplevBezier.fit(
                     points[len(points)//2::-1],
                     n_control_points=kwargs.get("n_control_points", None),
-                    spacing=kwargs.get("spacing", np.linspace(0,1,kwargs.get("n_control_points", 13)+1)[:-1]),
+                    spacing=kwargs.get("spacing", np.linspace(0,1,kwargs.get("n_control_points", 12)+1)[:-1]),
                     start_clamp='origin',
-                    end_clamp=np.array([1.0, kwargs.get("trailing_edge_thickness", 0.0005)/2]),
+                    end_clamp=np.array([1.0, kwargs.get("trailing_edge_thickness", 0.002)/2]),
                     damping_type=kwargs.get("damping_type", "deriv"),
                     w_damping=kwargs.get("w_damping", 1e-1),
                     method="SLSQP",
                     verbose=kwargs.get("verbose", False),
                     constraints=[
-                        {   # ensure all control points have positive y-values
+                        {   # ensure rounded leading edge (see GOE440)
                             "type": "ineq",
-                            "fun": lambda y: y
+                            "fun": lambda y: y[1] - y[0]*0.5
+                        },
+                        {   # force y>0.002 for first control point after the LE
+                            "type": "ineq",
+                            "fun": lambda y: y[0] - 0.002
                         },
                     ]
                 )
@@ -668,22 +694,26 @@ class BezierAirfoil(AirfoilBase):
                     n_control_points=kwargs.get("n_control_points", None),
                     spacing=kwargs.get("spacing", np.linspace(0,1,kwargs.get("n_control_points", 13)+1)[:-1]),
                     start_clamp='origin',
-                    end_clamp=np.array([1.0, -kwargs.get("trailing_edge_thickness", 0.0005)/2]),
+                    end_clamp=np.array([1.0, -kwargs.get("trailing_edge_thickness", 0.002)/2]),
                     damping_type=kwargs.get("damping_type", "deriv"),
                     w_damping=kwargs.get("w_damping", 1e-1),
                     method="SLSQP",
                     verbose=kwargs.get("verbose", False),
                     constraints=[
-                        {   # ensure all control points have negative y-values
+                        {   # ensure rounded leading edge (see GOE440)
                             "type": "ineq",
-                            "fun": lambda y: -y
+                            "fun": lambda y: -y[1] + y[0]*0.5
+                        },
+                        {   # force y>0.002 for first control point after the LE
+                            "type": "ineq",
+                            "fun": lambda y: -y[0] + 0.002
                         },
                     ]
                 )
                 surfacespline = SplevCBezier.from_control_points(
                     np.vstack([
-                        upper.control_points.round(6)[::-1],
-                        lower.control_points.round(6)[1:]
+                        upper.control_points[::-1],
+                        lower.control_points[1:]
                     ])
                 )
                 surfacespline.points = points
@@ -718,6 +748,10 @@ class BezierAirfoil(AirfoilBase):
                             "type": "ineq",
                             "fun": lambda y: y
                         },
+                        # {   # force y>0.002 for first control point after the LE
+                        #     "type": "ineq",
+                        #     "fun": lambda y: y[0] - 0.005
+                        # },
                     ]
                 )
                 camber_pts = bspline_airfoil.camber_line.evaluate_at(

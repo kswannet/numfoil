@@ -3,11 +3,13 @@ from functools import cached_property
 from warnings import warn as warning
 from abc import ABC, abstractmethod
 
+
 import numpy as np
 import scipy.optimize as opt
 import scipy.interpolate as si
 from scipy.spatial import KDTree
 from scipy.special import comb
+import matplotlib.pyplot as plt
 
 from .geom2d import normalize_2d, rotate_2d_90ccw, Point2D, Geom2D
 from ..util import cosine_spacing, chebyshev_nodes, ensure_1d_vector
@@ -87,6 +89,13 @@ class Curve(ABC):
         curvature = self.curvature_at(x)
         return np.where(curvature != 0, 1 / curvature, np.inf)
 
+    def plot(self, num_points: int = 200) -> None:
+        """Plot the curve using matplotlib."""
+        plt.plot(*self.evaluate_at(np.linspace(0,1,num_points)).T)
+        plt.xlabel("X")
+        plt.ylabel("Y")
+        plt.show()
+
     # @staticmethod
     # def arc_lengths(points: np.ndarray, normalize: bool = True) -> np.ndarray:
     #     """
@@ -119,17 +128,37 @@ class ParametricCurve(Curve, ABC):
         """Retrieve or create the spline representation of the curve."""
         raise NotImplementedError
 
-    @cached_property
+    @property
     def control_points(self) -> np.ndarray:
         """Retrieve the control points of the spline."""
-        return self.spline[1].T
+        return np.asarray(self.spline[1]).T.view(Point2D)
 
-    @cached_property
+    @control_points.setter
+    def control_points(self, value: np.ndarray) -> None:
+        """Set the control points of the spline."""
+        if value.ndim != 2 or (value.shape[1] != 2 and value.shape[0] != 2):
+            raise ValueError(
+                "Control points must be a 2D array with shape (n, 2) or (2, n)."
+            )
+        self.spline[1] = value.T if value.shape[1] == 2 else value
+
+    @property
     def knots(self) -> np.ndarray:
         """Retrieve the knot vector of the spline."""
-        return self.spline[0]
+        return np.asarray(self.spline[0])
 
-    @cached_property
+    @knots.setter
+    def knots(self, value: np.ndarray) -> None:
+        """Set the knot vector of the spline."""
+        # if value.ndim != 1:
+        #     raise ValueError("Knot vector must be a 1D array.")
+        # self.spline[0] = value
+        raise NotImplementedError(
+            f"Nope, shouldn't do that \n" +
+            f"Trying to replace degree {self.spline[0]} with {value}."
+        )
+
+    @property
     def degree(self) -> int:
         """Retrieve the degree of the spline."""
         if self.spline[2] != self.n_control_points - 1:
@@ -138,7 +167,7 @@ class ParametricCurve(Curve, ABC):
                 )
         return self.spline[2]
 
-    @cached_property
+    @property
     def n_control_points(self):
         """
         Retrieve the number of control points in the spline.
@@ -273,35 +302,35 @@ class BSpline2D(ParametricCurve):
         """
         return si.splprep(self.points.T, s=self.smoothing, k=self.degree)[0]
 
-    @property
-    def control_points(self) -> np.ndarray:
-        """Retrieve the control points of the spline."""
-        return self.spline[1].T.view(Point2D)
+    # @property
+    # def control_points(self) -> np.ndarray:
+    #     """Retrieve the control points of the spline."""
+    #     return self.spline[1].T.view(Point2D)
 
-    @control_points.setter
-    def control_points(self, value: np.ndarray) -> None:
-        """Set the control points of the spline."""
-        if value.ndim != 2 or (value.shape[1] != 2 and value.shape[0] != 2):
-            raise ValueError(
-                "Control points must be a 2D array with shape (n, 2) or (2, n)."
-            )
-        self.spline[1] = value.T if value.shape[1] == 2 else value
+    # @control_points.setter
+    # def control_points(self, value: np.ndarray) -> None:
+    #     """Set the control points of the spline."""
+    #     if value.ndim != 2 or (value.shape[1] != 2 and value.shape[0] != 2):
+    #         raise ValueError(
+    #             "Control points must be a 2D array with shape (n, 2) or (2, n)."
+    #         )
+    #     self.spline[1] = value.T if value.shape[1] == 2 else value
 
-    @property
-    def knots(self) -> np.ndarray:
-        """Retrieve the knot vector of the spline."""
-        return self.spline[0]
+    # # @property
+    # # def knots(self) -> np.ndarray:
+    # #     """Retrieve the knot vector of the spline."""
+    # #     return self.spline[0]
 
-    @knots.setter
-    def knots(self, value: np.ndarray) -> None:
-        """Set the knot vector of the spline."""
-        # if value.ndim != 1:
-        #     raise ValueError("Knot vector must be a 1D array.")
-        # self.spline[0] = value
-        raise NotImplementedError(
-            f"Nope, shouldn't do that \n" +
-            f"Trying to replace degree {self.spline[0]} with {value}."
-            )
+    # @knots.setter
+    # def knots(self, value: np.ndarray) -> None:
+    #     """Set the knot vector of the spline."""
+    #     # if value.ndim != 1:
+    #     #     raise ValueError("Knot vector must be a 1D array.")
+    #     # self.spline[0] = value
+    #     raise NotImplementedError(
+    #         f"Nope, shouldn't do that \n" +
+    #         f"Trying to replace degree {self.spline[0]} with {value}."
+    #         )
 
     @property
     def degree(self):
@@ -685,8 +714,8 @@ class SplevBezier(ParametricCurve):
         """
         knot_vector = np.hstack(
             [
-            [0.0] * (self.degree + 1),
-            [1.0] * (self.degree + 1)
+                [0.0] * (self.degree + 1),
+                [1.0] * (self.degree + 1)
             ]
         )
         return knot_vector
@@ -1119,7 +1148,6 @@ class SplevCBezier(BSpline2D):
     def lower_control_points(self) -> np.ndarray:
         """Retrieve the upper control points of the spline."""
         return self.control_points[self.n_control_points//2:]
-
 
     def resampled_points(self, n_points: int = 199) -> np.ndarray:
         """

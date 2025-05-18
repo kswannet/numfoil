@@ -119,18 +119,26 @@ class AirfoilNormalizer:
     """
 
     @classmethod
-    def normalize(cls, data: np.ndarray | BSpline2D) -> BSpline2D:
+    def normalize(cls, data: np.ndarray | BSpline2D, output="spline") -> BSpline2D:
         if isinstance(data, BSpline2D):
             return cls._normalize_spline(data)
         elif isinstance(data, np.ndarray):
             points = cls._remove_consecutive_duplicates(data)
             spline = BSpline2D(points)
-            return cls._normalize_spline(spline)
+            match output:
+                case "spline":
+                    return cls._normalize_spline(spline)
+                case "points":
+                    leading_edge, trailing_edge, _ = cls._find_leading_trailing_edges(spline)
+                    scale, translation, rotation = cls._compute_transformation(leading_edge, trailing_edge)
+                    return cls._apply_transformation(points, scale, translation, rotation)
+                case _:
+                    raise ValueError(f"Unknown output type: {output}")
         else:
             raise TypeError("Input must be a numpy array or BSpline2D.")
 
     @classmethod
-    def _normalize_spline(cls, spline: BSpline2D,  find_trailing_edge: bool = True) -> BSpline2D:
+    def _normalize_spline(cls, spline: BSpline2D,  find_trailing_edge: bool = False) -> BSpline2D:
         leading_edge, trailing_edge, u_leading_edge = cls._find_leading_trailing_edges(spline,  find_trailing_edge=find_trailing_edge)
         scale, translation, rotation = cls._compute_transformation(leading_edge, trailing_edge)
 
@@ -194,7 +202,12 @@ class AirfoilNormalizer:
         return np.vstack([points[0], points[idx]])
 
     @staticmethod
-    def _find_trailing_edge(spline: BSpline2D, find_trailing_edge=True, verbose=False) -> tuple[np.ndarray, np.ndarray]:
+    def _remove_overshoots(points: np.ndarray) -> np.ndarray:
+        """Removes points that are outside the range x=[0, 1]."""
+        return points[(points[:, 0] >= 0) & (points[:, 0] <= 1)]
+
+    @staticmethod
+    def _find_trailing_edge(spline: BSpline2D, find_trailing_edge=False, verbose=False) -> tuple[np.ndarray, np.ndarray]:
         """Finds the trailing edge of the airfoil. To account for cases where
         the trailing edge is ill-defined, or missing, there are two methods.
         First, the trailing edge is found by maximizing the distance from the
@@ -277,6 +290,7 @@ class AirfoilNormalizer:
             # skipped and the trailing edge is assumed (hoped) to be the
             # midpoint of the defined end points.
             trailing_edge = 0.5*(spline.evaluate_at(0) + spline.evaluate_at(1))
+            trailing_edge[0] = np.min([spline.evaluate_at(0)[0], spline.evaluate_at(1)[0]])
         return trailing_edge
 
     @staticmethod
