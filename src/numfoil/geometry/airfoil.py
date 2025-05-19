@@ -736,10 +736,10 @@ class BezierAirfoil(AirfoilBase):
                     n_control_points=kwargs.get("n_control_points", None),
                     spacing=kwargs.get(
                         "spacing",
-                        np.linspace(0,1,kwargs.get("n_control_points", 13)+1)[:-1]
+                        np.linspace(0, 1, kwargs.get("n_control_points", 13)+1)[1:-1]
                     ),
                     start_clamp='origin',
-                    end_clamp=np.array([1.0, kwargs.get("trailing_edge_thickness", 0.0005)]),
+                    end_clamp=np.array([1.0, kwargs.get("trailing_edge_thickness", 0.002)]),
                     damping_type=kwargs.get("damping_type", "deriv"),
                     w_damping=kwargs.get("w_damping", 1e-1),
                     verbose=kwargs.get("verbose", False),
@@ -748,10 +748,14 @@ class BezierAirfoil(AirfoilBase):
                             "type": "ineq",
                             "fun": lambda y: y
                         },
-                        # {   # force y>0.002 for first control point after the LE
-                        #     "type": "ineq",
-                        #     "fun": lambda y: y[0] - 0.005
-                        # },
+                        {   # ensure rounded leading edge (see GOE440)
+                            "type": "ineq",
+                            "fun": lambda y: y[0] - 0.005
+                        },
+                        {   # ensure rounded leading edge (see GOE440)
+                            "type": "ineq",
+                            "fun": lambda y: y[1] - y[0]*0.5
+                        },
                     ]
                 )
                 camber_pts = bspline_airfoil.camber_line.evaluate_at(
@@ -763,12 +767,23 @@ class BezierAirfoil(AirfoilBase):
                     spacing=kwargs.get(
                         "spacing",
                         np.linspace(0,1,kwargs.get("n_control_points", 13)+1)[:-1]
-                    ),
-                    start_clamp='origin',
+                    )[1:],
+                    start_clamp=np.array([[0.0, 0.0],[0.0, 0.0]]),#'origin', #
+                    # start_clamp='origin', #
                     end_clamp=np.array([1.0, 0.0]),
                     damping_type=kwargs.get("damping_type", "deriv"),
                     w_damping=kwargs.get("w_damping", 1e-1),
                     verbose=kwargs.get("verbose", False),
+                    constraints=[
+                        # {
+                        #     "type": "ineq",
+                        #     "fun": lambda y: y[0] + 0.002
+                        # },
+                        # {
+                        #     "type": "ineq",
+                        #     "fun": lambda y: 0.002 - y[0]
+                        # },
+                    ]
                 )
                 return cls.from_camber_thickness(
                     thickness_distribution,

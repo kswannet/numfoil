@@ -136,7 +136,7 @@ def chebyshev_nodes(start: float, end:float , num: int) -> np.ndarray:
 
 def selig(array) -> np.ndarray:
     """Return a given array of x-locations in Selig format."""
-    if array[0] != 0.0 or array[-1] != 1.0 or np.all(np.diff(array) > 0):
+    if array[0] != 0.0 or array[-1] != 1.0 or not np.all(np.diff(array) > 0):
         raise ValueError(
             "Array must start with 0 and end with 1 and be strictly increasing."
         )

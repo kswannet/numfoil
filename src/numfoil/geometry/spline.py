@@ -1029,13 +1029,15 @@ class SplevCBezier(BSpline2D):
         if len(self.knots) != self.n_control_points + self.degree + 1:
             raise ValueError(
                 f"Invalid number of knots. {len(self.knots)} provided but {self.n_control_points + self.degree + 1} required"
-                )
+            )
 
         # Validate multiplicity for the first knot (should be degree+1)
         first_mult = unique_knots_counts[0]
         if first_mult != self.degree + 1:
-            raise ValueError(f"First knot ({unique_knots[0]}) has multiplicity {first_mult}, "
-                            f"expected {self.degree + 1}.")
+            raise ValueError(
+                f"First knot ({unique_knots[0]}) has multiplicity {first_mult}, "
+                f"expected {self.degree + 1}."
+            )
 
         # Validate multiplicity for the last knot (should be degree+1)
         last_mult = unique_knots_counts[-1]
@@ -1096,26 +1098,26 @@ class SplevCBezier(BSpline2D):
         self.spline[0] = value
         self._validate_degree_and_knots()
 
-    @property
-    def control_points(self):
-        """
-        Retrieve the control points of the spline.
+    # @property
+    # def control_points(self):
+    #     """
+    #     Retrieve the control points of the spline.
 
-        Returns:
-            ndarray: An array of control points for the spline.
-        """
-        return self.spline[1].T
+    #     Returns:
+    #         ndarray: An array of control points for the spline.
+    #     """
+    #     return self.spline[1].T
 
-    @control_points.setter
-    def control_points(self, value):
-        """
-        Set the control points of the spline.
+    # @control_points.setter
+    # def control_points(self, value):
+    #     """
+    #     Set the control points of the spline.
 
-        Args:
-            value (ndarray): New control points to set.
-        """
-        self.spline[1] = value.T if value.shape[1] == 2 else value
-        self._validate_degree_and_knots()
+    #     Args:
+    #         value (ndarray): New control points to set.
+    #     """
+    #     self.spline[1] = value.T if value.shape[1] == 2 else value
+    #     self._validate_degree_and_knots()
 
     @property
     def degree(self):
