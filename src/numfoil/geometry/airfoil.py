@@ -265,7 +265,16 @@ class AirfoilBase(ABC):
             *self.leading_edge_vector
         )
 
-    def plot(self, n_points = 1000):
+    @property
+    def points(self) -> np.ndarray:
+        """Returns sampled points of the airfoil surface."""
+        x = cosine_spacing(0, 1, num=100)
+        return np.vstack([
+            np.column_stack([x, self.upper_surface_at(x)])[::-1],
+            np.column_stack([x, self.lower_surface_at(x)])[1:],
+        ])
+
+    def plot(self, n_points=1000):
         """Plots the airfoil geometry."""
         x = cosine_spacing(0,1, num=n_points)
         fig, ax = plt.subplots()
@@ -673,7 +682,10 @@ class BezierAirfoil(AirfoilBase):
                     n_control_points=kwargs.get("n_control_points", None),
                     spacing=kwargs.get("spacing", np.linspace(0,1,kwargs.get("n_control_points", 12)+1)[:-1]),
                     start_clamp='origin',
-                    end_clamp=np.array([1.0, kwargs.get("trailing_edge_thickness", 0.002)/2]),
+                    end_clamp=kwargs.get(
+                        "end_clamp",
+                        np.array([1.0, kwargs.get("trailing_edge_thickness", 0.002)/2])
+                    ),
                     damping_type=kwargs.get("damping_type", "deriv"),
                     w_damping=kwargs.get("w_damping", 1e-1),
                     method="SLSQP",
@@ -694,7 +706,10 @@ class BezierAirfoil(AirfoilBase):
                     n_control_points=kwargs.get("n_control_points", None),
                     spacing=kwargs.get("spacing", np.linspace(0,1,kwargs.get("n_control_points", 13)+1)[:-1]),
                     start_clamp='origin',
-                    end_clamp=np.array([1.0, -kwargs.get("trailing_edge_thickness", 0.002)/2]),
+                    end_clamp=kwargs.get(
+                        "end_clamp",
+                        np.array([1.0, -kwargs.get("trailing_edge_thickness", 0.002)/2])
+                    ),
                     damping_type=kwargs.get("damping_type", "deriv"),
                     w_damping=kwargs.get("w_damping", 1e-1),
                     method="SLSQP",
