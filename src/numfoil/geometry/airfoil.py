@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 
 import scipy.interpolate as si
 import scipy.optimize as opt
+import scipy.integrate as spi
 
 from functools import cached_property
 from typing import Union, Tuple
@@ -180,6 +181,14 @@ class AirfoilBase(ABC):
         return self.camber_line.evaluate_at(result.x[0])
 
     @cached_property
+    def area(self) -> float:
+        """Calculates the area of the airfoil."""
+        x = cosine_spacing(0, 1, num=1000)
+        t = self.thickness_at(x)
+        return np.trapz(t, x)
+        # return spi.simpson(t, x)
+
+    @cached_property
     def leading_edge_radius(self) -> np.ndarray:
         """Returns the leading edge radius of the airfoil."""
         return self.surface.radius_at(0.5)
@@ -310,7 +319,7 @@ class BsplineAirfoil(AirfoilBase):
         # the shortened name of the airfoil, usually the filename
         self.name = name
         # the full name of the airfoil, usually from the file header
-        self.description = description or name
+        self.description = description.replace(' AIRFOIL', '') or name
 
         self.u_leading_edge = 0.5
 
@@ -553,7 +562,7 @@ class BezierAirfoil(AirfoilBase):
         # the shortened name of the airfoil, usually the filename
         self.name = name
         # the full name of the airfoil, usually from the file header
-        self.description = description or name
+        self.description = description.replace(' AIRFOIL', '') if description is not None else name
 
         self.u_leading_edge = 0.5
 
@@ -596,7 +605,13 @@ class BezierAirfoil(AirfoilBase):
         description: str = None,
         normalize: bool = True,
         fit_method: str = "split_u_l",
-        **kwargs: dict
+        n_control_points: int = None,
+        control_point_spacing=cosine_spacing(0, 1, 13)[:-1],
+        end_clamp: str | np.ndarray = "data",
+        trailing_edge_thickness: float | None = None,
+        damping_type: str = "deriv",
+        w_damping: float = 1e-1,
+        find_trailing_edge: bool = True,
     ):
         """Creates an Airfoil object from an array of points.
 
@@ -648,7 +663,7 @@ class BezierAirfoil(AirfoilBase):
         # To improve the fitting of the new spline, points are resampled from
         # the normalized bspline
         if normalize:
-            normalized_bspline = AirfoilNormalizer.normalize(points)
+            normalized_bspline = AirfoilNormalizer.normalize(points, find_trailing_edge=find_trailing_edge)
             points = AirfoilNormalizer._remove_overshoots(
                 normalized_bspline.evaluate_at(
                     np.hstack([
@@ -660,68 +675,52 @@ class BezierAirfoil(AirfoilBase):
 
         # TODO : clean this up, there must be a better way than this mess...
         match fit_method:
-            case "full":
-                # Use the composite bezier class to fit the entire curve at once
-                surfacespline = SplevCBezier.fit(
-                    points,
-                    kwargs.get("n_control_points", 12),
-                    spacing=kwargs.get("spacing", "linear"),
-                    verbose=False,
-                    w_damping=kwargs.get("w_damping", 1e-3),
-                )
-                return cls(
-                    surfacespline,
-                    name=name,
-                    description=description,
-                )
             case "split_u_l":
                 # split the points in upper and lower and fit those seperatly
                 # prefered method as it is much faster
                 upper = SplevBezier.fit(
                     points[len(points)//2::-1],
-                    n_control_points=kwargs.get("n_control_points", None),
-                    spacing=kwargs.get("spacing", np.linspace(0,1,kwargs.get("n_control_points", 12)+1)[:-1]),
+                    n_control_points=n_control_points,
+                    spacing=control_point_spacing,
                     start_clamp='origin',
-                    end_clamp=kwargs.get(
-                        "end_clamp",
-                        np.array([1.0, kwargs.get("trailing_edge_thickness", 0.002)/2])
-                    ),
-                    damping_type=kwargs.get("damping_type", "deriv"),
-                    w_damping=kwargs.get("w_damping", 1e-1),
-                    method="SLSQP",
-                    verbose=kwargs.get("verbose", False),
+                    end_clamp=end_clamp if trailing_edge_thickness is None else np.array([1.0, trailing_edge_thickness/2]),
+                    damping_type=damping_type,
+                    w_damping=w_damping,
                     constraints=[
+                        # {   # ensure all control points have positive y-values
+                        #     "type": "ineq",
+                        #     "fun": lambda y: y
+                        # },
+                        {   # force y>0.005 for first control point after the LE
+                            "type": "ineq",
+                            "fun": lambda y: y[0] - 0.002
+                        },
                         {   # ensure rounded leading edge (see GOE440)
                             "type": "ineq",
                             "fun": lambda y: y[1] - y[0]*0.5
-                        },
-                        {   # force y>0.002 for first control point after the LE
-                            "type": "ineq",
-                            "fun": lambda y: y[0] - 0.002
                         },
                     ]
                 )
                 lower = SplevBezier.fit(
                     points[len(points)//2:],
-                    n_control_points=kwargs.get("n_control_points", None),
-                    spacing=kwargs.get("spacing", np.linspace(0,1,kwargs.get("n_control_points", 13)+1)[:-1]),
+                    n_control_points=n_control_points,
+                    spacing=control_point_spacing,
                     start_clamp='origin',
-                    end_clamp=kwargs.get(
-                        "end_clamp",
-                        np.array([1.0, -kwargs.get("trailing_edge_thickness", 0.002)/2])
-                    ),
-                    damping_type=kwargs.get("damping_type", "deriv"),
-                    w_damping=kwargs.get("w_damping", 1e-1),
-                    method="SLSQP",
-                    verbose=kwargs.get("verbose", False),
+                    end_clamp=end_clamp if trailing_edge_thickness is None else np.array([1.0, -trailing_edge_thickness/2]),
+                    damping_type=damping_type,
+                    w_damping=w_damping,
                     constraints=[
+                        # {   # ensure all control points have negative y-values
+                        #     "type": "ineq",
+                        #     "fun": lambda y: -y
+                        # },
+                        {   # force y>0.005 for first control point after the LE
+                            "type": "ineq",
+                            "fun": lambda y: -y[0] + 0.002
+                        },
                         {   # ensure rounded leading edge (see GOE440)
                             "type": "ineq",
                             "fun": lambda y: -y[1] + y[0]*0.5
-                        },
-                        {   # force y>0.002 for first control point after the LE
-                            "type": "ineq",
-                            "fun": lambda y: -y[0] + 0.002
                         },
                     ]
                 )
@@ -748,29 +747,25 @@ class BezierAirfoil(AirfoilBase):
                 )
                 thickness_distribution = SplevBezier.fit(
                     thickness_pts,
-                    n_control_points=kwargs.get("n_control_points", None),
-                    spacing=kwargs.get(
-                        "spacing",
-                        np.linspace(0, 1, kwargs.get("n_control_points", 13)+1)[1:-1]
-                    ),
+                    n_control_points=n_control_points,
+                    spacing=control_point_spacing,
                     start_clamp='origin',
-                    end_clamp=np.array([1.0, kwargs.get("trailing_edge_thickness", 0.002)]),
-                    damping_type=kwargs.get("damping_type", "deriv"),
-                    w_damping=kwargs.get("w_damping", 1e-1),
-                    verbose=kwargs.get("verbose", False),
+                    end_clamp=end_clamp,
+                    damping_type=damping_type,
+                    w_damping=w_damping,
                     constraints=[
                         {   # ensure all control points have positive y-values
                             "type": "ineq",
                             "fun": lambda y: y
                         },
-                        {   # ensure rounded leading edge (see GOE440)
-                            "type": "ineq",
-                            "fun": lambda y: y[0] - 0.005
-                        },
-                        {   # ensure rounded leading edge (see GOE440)
-                            "type": "ineq",
-                            "fun": lambda y: y[1] - y[0]*0.5
-                        },
+                        # {   # ensure rounded leading edge (see GOE440)
+                        #     "type": "ineq",
+                        #     "fun": lambda y: y[0] - 0.005
+                        # },
+                        # {   # ensure rounded leading edge (see GOE440)
+                        #     "type": "ineq",
+                        #     "fun": lambda y: y[1] - y[0]*0.5
+                        # },
                     ]
                 )
                 camber_pts = bspline_airfoil.camber_line.evaluate_at(
@@ -778,17 +773,12 @@ class BezierAirfoil(AirfoilBase):
                 )
                 camber_curve = SplevBezier.fit(
                     camber_pts,
-                    n_control_points=kwargs.get("n_control_points", None),
-                    spacing=kwargs.get(
-                        "spacing",
-                        np.linspace(0,1,kwargs.get("n_control_points", 13)+1)[:-1]
-                    )[1:],
-                    start_clamp=np.array([[0.0, 0.0],[0.0, 0.0]]),#'origin', #
-                    # start_clamp='origin', #
-                    end_clamp=np.array([1.0, 0.0]),
-                    damping_type=kwargs.get("damping_type", "deriv"),
-                    w_damping=kwargs.get("w_damping", 1e-1),
-                    verbose=kwargs.get("verbose", False),
+                    n_control_points=n_control_points,
+                    spacing=control_point_spacing,
+                    start_clamp='origin',
+                    end_clamp=end_clamp,
+                    damping_type=damping_type,
+                    w_damping=w_damping,
                     constraints=[
                         # {
                         #     "type": "ineq",
@@ -807,17 +797,22 @@ class BezierAirfoil(AirfoilBase):
                     description=description,
                     points=points,
                 )
+            case "full":  # ! this one is a bad idea, as it is very slow
+                # Use the composite bezier class to fit the entire curve at once
+                surfacespline = SplevCBezier.fit(
+                    points,
+                    n_control_points,
+                    spacing=control_point_spacing,
+                    w_damping=w_damping,
+                )
+                return cls(
+                    surfacespline,
+                    name=name,
+                    description=description,
+                )
             case _:
                 raise ValueError(f"Unknown fit method: {fit_method}")
-        # add original points again for reference
-        # surfacespline.data_points = normalized_bspline.points
 
-        # return cls(
-        #     surfacespline,
-        #     name=name,
-        #     description=description,
-        #     # data_points=new_points,
-        # )
 
     @classmethod
     def from_file(

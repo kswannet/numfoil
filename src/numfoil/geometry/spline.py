@@ -89,7 +89,7 @@ class Curve(ABC):
         curvature = self.curvature_at(x)
         return np.where(curvature != 0, 1 / curvature, np.inf)
 
-    def plot(self, num_points: int = 200) -> None:
+    def plot(self, num_points: int = 2000) -> None:
         """Plot the curve using matplotlib."""
         plt.plot(*self.evaluate_at(np.linspace(0,1,num_points)).T)
         plt.xlabel("X")
