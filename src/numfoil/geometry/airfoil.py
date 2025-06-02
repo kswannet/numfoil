@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import warnings
 
 import scipy.interpolate as si
 import scipy.optimize as opt
@@ -7,7 +8,7 @@ import scipy.integrate as spi
 
 from functools import cached_property
 from typing import Union, Tuple
-from abc import ABCMeta, abstractmethod,ABC
+from abc import ABCMeta, abstractmethod, ABC
 
 from .data import AirfoilDataFile, AirfoilNormalizer
 from ..util import cosine_spacing, chebyshev_nodes, ensure_1d_vector, selig
@@ -319,7 +320,7 @@ class BsplineAirfoil(AirfoilBase):
         # the shortened name of the airfoil, usually the filename
         self.name = name
         # the full name of the airfoil, usually from the file header
-        self.description = description.replace(' AIRFOIL', '') or name
+        self.description = name if description is None else description.replace(' AIRFOIL', '')
 
         self.u_leading_edge = 0.5
 
@@ -562,7 +563,8 @@ class BezierAirfoil(AirfoilBase):
         # the shortened name of the airfoil, usually the filename
         self.name = name
         # the full name of the airfoil, usually from the file header
-        self.description = description.replace(' AIRFOIL', '') if description is not None else name
+        # self.description = description.replace(' AIRFOIL', '') if description is not None else name
+        self.description = name if description is None else description.replace(' AIRFOIL', '')
 
         self.u_leading_edge = 0.5
 
@@ -644,36 +646,112 @@ class BezierAirfoil(AirfoilBase):
                 and fitting two curves separately is much faster than fitting
                 one big one.
 
-            kwargs (dict):
-                Additional arguments for the fitting method.
+            n_control_points (int):
+                Number of control points to use for the fitting.
+                Defaults to 13. If None, it will be set to the number of
+                points in the input array.
 
+            control_point_spacing (np.ndarray):
+                Spacing of the control points. Defaults to cosine spacing
+                from 0 to 1 with 13 points.
+
+            end_clamp (str | np.ndarray):
+                Clamping method for the end control points.
+                Options are:
+                - None: No clamping, the end control points will be fit.
+                - "data": Use the last point of the data as the end control point.
+                - "origin": Clamp to the origin (0, 0).
+                - np.ndarray: Custom end control points as a 2-element array.
+                Defaults to "data".
+
+            trailing_edge_thickness (float | None):
+                Thickness of the trailing edge. If specified, the end control
+                points will be adjusted to ensure the trailing edge has the
+                specified thickness. If None, no adjustment is made.
+                Defaults to None.
+
+            damping_type (str):
+                Type of damping to apply during fitting.
+                Options are:
+                - "deriv": Damping based on the derivative of the curve.
+                - "dist": Damping based on the distance from curve.
+                - "none": No damping.
+                Defaults to "deriv".
+
+            w_damping (float):
+                Weighting factor for the damping. Defaults to 1e-1.
+
+            find_trailing_edge (bool):
+                Whether to find the trailing edge of the airfoil.
+                If True, the curve will be slightly processed to get a more
+                accurate location of the trailing edge. If False, the
+                trailing edge will be assumed to be the midpoint of the
+                curve ends.
+                Defaults to True.
 
         Raises:
             TypeError: Input must be a numpy array.
             ValueError: Invalid shape for input array.
+            ValueError: Unknown fit method.
+            ValueError: If the input array does not have the correct shape
 
         Returns:
             Airfoil: Airfoil object initialized with input
+
+        TODO:
+            - remove the start_clamp and end_clamp arguments, replace them with
+              leading_edge and trailing_edge arguments, which are substituted
+              accordingly by the clamp arguments for the curve fits.
+                leading_edge=origin always
+                trailing_edge:
+                    - None | "free": no clamping, the end control points will be fit
+                    - data: use the last point of the data as the end control point
+                    - closed: clamp to the origin (0, 0)
+                    - float: defines the trailing edge thickness, 0 would be the
+                      same as "closed"
+            - add an option for the trailing edge point to either be appended to
+              the control points, or replace the final point (like it does now,
+              which is why the spacing should be linspace(0,1,n)[:-1], as the
+              last point is fixed and we dont want double points at x=1)
+
         """
         if not isinstance(points, np.ndarray):
             raise TypeError("Input must be a numpy array.")
         if points.shape[1] != 2:
             raise ValueError("Input array must have shape (n, 2).")
 
+        if trailing_edge_thickness is not None and end_clamp is not None:
+            raise ValueError(
+                "Cannot specify both trailing_edge_thickness and end_clamp."
+                "Well, you could, and thickness would take priority, ignoring "
+                "the end_clamp argument. So best to set end_clamp to None "
+                "explicitly to avoid confusion."
+                "This will (should)(probably)(maybe) be fixed in the future."
+            )
+
         # To improve the fitting of the new spline, points are resampled from
         # the normalized bspline
         if normalize:
             normalized_bspline = AirfoilNormalizer.normalize(points, find_trailing_edge=find_trailing_edge)
-            points = AirfoilNormalizer._remove_overshoots(
-                normalized_bspline.evaluate_at(
-                    np.hstack([
-                        cosine_spacing(0, normalized_bspline.u_leading_edge, num=100),
-                        cosine_spacing(normalized_bspline.u_leading_edge, 1, num=100)[1:],
-                    ])
+            #if the bspline fits poorly and causes overlap, us the original points
+            if np.any(normalized_bspline.evaluate_at(np.linspace(0, normalized_bspline.u_leading_edge, 1000)).y - normalized_bspline.evaluate_at(np.linspace(normalized_bspline.u_leading_edge, 1, 1000)).y < 0):
+                points = AirfoilNormalizer.normalize(points, find_trailing_edge=find_trailing_edge, output="points").T
+                if fit_method == "split_t_c":
+                    warnings.warn(
+                        "Fitting BSpline for normalizatoin causes surface overlap, likely due to poor data quality. "
+                        "Using original points for fitting and switching to 'split_u_l' method."
+                    )
+                    fit_method = "split_u_l"
+            else:
+                points = AirfoilNormalizer._remove_overshoots(
+                    normalized_bspline.evaluate_at(
+                        np.hstack([
+                            cosine_spacing(0, normalized_bspline.u_leading_edge, num=100),
+                            cosine_spacing(normalized_bspline.u_leading_edge, 1, num=100)[1:],
+                        ])
+                    )
                 )
-            )
 
-        # TODO : clean this up, there must be a better way than this mess...
         match fit_method:
             case "split_u_l":
                 # split the points in upper and lower and fit those seperatly
@@ -1002,6 +1080,7 @@ class CSTAirfoil(AirfoilBase):
         full_name: str = None,
         normalize: bool = True,
     ):
+        raise NotImplementedError("not yet")
         # the original input points, mainly for reference
         self.data_points = data_points
         # the data points after processing, used for fitting
