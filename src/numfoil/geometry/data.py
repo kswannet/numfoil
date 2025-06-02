@@ -7,6 +7,7 @@ from .spline import BSpline2D, SplevCBezier
 from .geom2d import Point2D, Geom2D
 import os
 
+
 class AirfoilDataFile:
     """
     Class that loads airfoil coordinate data and any header lines from a file.
@@ -136,6 +137,7 @@ class AirfoilNormalizer:
                     raise ValueError(f"Unknown output type: {output}")
         else:
             raise TypeError("Input must be a numpy array or BSpline2D.")
+        
 
     @classmethod
     def _normalize_spline(cls, spline: BSpline2D,  find_trailing_edge: bool = False) -> BSpline2D:
@@ -254,9 +256,9 @@ class AirfoilNormalizer:
                 )
 
             # some verification
-            assert np.all(spline.evaluate_at(0) == spline.control_points[0]), \
+            assert np.allclose(spline.evaluate_at(0), spline.control_points[0], rtol=0), \
                 "The first control point does not coincide with u=0."
-            assert np.all(spline.evaluate_at(1) == spline.control_points[-1]), \
+            assert np.allclose(spline.evaluate_at(1), spline.control_points[-1], rtol=0), \
                 "The last control point does not coincide with u=1."
 
             # spline_start, spline_end = spline.evaluate_at(0), spline.evaluate_at(1)
@@ -265,7 +267,7 @@ class AirfoilNormalizer:
 
             # if the found max x locations coincide with the spline end points,
             # at least no funky stuff is going on, at most some missing points:
-            if np.all(res1_TE == spline_start) and np.all(res2_TE == spline_end):
+            if np.allclose(res1_TE, spline_start, rtol=0) and np.allclose(res2_TE, spline_end, rtol=0):
                 # if the spline endpoints have the same x-coordinate,
                 # the trailing edge is assumed to be at the midpoint of
                 # the start and end points
@@ -288,7 +290,7 @@ class AirfoilNormalizer:
                     spline = cls._force_trailing_edge_at_x1(spline, target="xmax")
                     # at this point, the trailing edge should be fine, but imma
                     # check anyway because trust isssues
-                    assert spline.evaluate_at(0)[0] == spline.evaluate_at(-1)[0], \
+                    assert np.allclose(spline.evaluate_at(0)[0], spline.evaluate_at(1)[0], rtol=0), \
                         "trailing edge does not match for upper and lower surface."
                     spline_start, spline_end = spline.control_points[0], spline.control_points[-1]
                     trailing_edge = 0.5 * (spline_start + spline_end)
@@ -354,9 +356,9 @@ class AirfoilNormalizer:
         assert target in ["xmax", "1"], \
             f"Unknown target for trailing edge: {target}. " + \
             "Must be either 'xmax' or '1'."
-        assert np.all(spline.evaluate_at(0) == spline.control_points[0]), \
+        assert np.allclose(spline.evaluate_at(0), spline.control_points[0], rtol=0), \
             "The first control point does not coincide with u=0."
-        assert np.all(spline.evaluate_at(1) == spline.control_points[-1]), \
+        assert np.allclose(spline.evaluate_at(1), spline.control_points[-1], rtol=0), \
             "The last control point does not coincide with u=1."
 
         spline_start, spline_end = spline.control_points[0], spline.control_points[-1]
@@ -446,9 +448,9 @@ class AirfoilNormalizer:
                     "The first and last control points do not have the same y-coordinate after adjustment. "
 
         # Also verify that the adjusted control points are valid:
-        assert np.all(spline.evaluate_at(0) == spline.control_points[0]), \
+        assert np.allclose(spline.evaluate_at(0), spline.control_points[0], rtol=0), \
             "The first control point does not coincide with u=0 after adjustment."
-        assert np.all(spline.evaluate_at(1) == spline.control_points[-1]), \
+        assert np.allclose(spline.evaluate_at(1), spline.control_points[-1], rtol=0), \
             "The last control point does not coincide with u=1 after adjustment."
 
         return spline
