@@ -408,7 +408,7 @@ class Bezier(ParametricCurve):
         Args:
             points (np.ndarray): Input coordinates for fitting the curve.
             n_control_points (int): Number of control points to fit.
-            spacing (str): Spacing method for control points ("linear" or "cosine").
+            control_point_spacing (str): control_point_spacing method for control points ("linear" or "cosine").
         """
         if control_points.ndim != 2 or control_points.shape[1] != 2:
             raise ValueError(
@@ -645,7 +645,7 @@ class Bezier(ParametricCurve):
         return (cls(control_points, points), results) if return_results else cls(control_points, points)
 
 
-class SplevBezier(ParametricCurve):
+class  SplevBezier(ParametricCurve):
     """Bezier curve defined by a B-spline representation.
     Represents a Bezier curve defined by a B-spline representation (tck tuple)
     with the knot vector clamping the endpoints.
@@ -765,6 +765,7 @@ class SplevBezier(ParametricCurve):
     def from_control_points(cls, control_points):
         """
         Create an instance of the class from control points.
+        Really just calls the constructor.
 
         Args:
             control_points (np.ndarray): Control points for the spline.
@@ -780,15 +781,16 @@ class SplevBezier(ParametricCurve):
     def fit(
         cls,
         points: np.ndarray,
-        n_control_points: int = 12,
-        spacing: str | None = None,
-        start_clamp: str | None = 'data',
-        end_clamp: str | None = 'data',
-        w_damping: float = 1e-3,
+        n_control_points: int = None,
+        control_point_spacing: str | None = None,
+        start_clamp: None | Tuple[str | np.ndarray , str] = ('data', 'replace'),
+        end_clamp: None | Tuple[str | np.ndarray , str] = ('data', 'replace'),
+        w_damping: float = 1e-1,
+        damping_type: str = 'deriv',
         verbose: bool = False,
         method: str | None = "SLSQP",
-        damping_type: str = 'deriv',
         constraints: Optional[List[dict]] = None,
+        **kwargs,
     ):
         """Fit a Bézier curve to the given points using a B-spline representation.
 
@@ -799,19 +801,13 @@ class SplevBezier(ParametricCurve):
             n_control_points (int):
                 Number of control points to fit.
 
-            spacing (str or np.ndarray):
-                A string defining the type of spacing used or None.
+            control_point_spacing (str or np.ndarray):
+                A string defining the type of control_point_spacing used or None.
                 Defaults to "cosine".
 
             w_damping (float):
                 Weight for the damping term in the optimization objective.
                 Defaults to 1e-3.
-
-            # endpoints (str):
-            #     Where the curve end points should be fixed. Options are:
-            #     - 'data': endpoints are fixed to the data points.
-            #     - 'free': endpoints are free to move.
-            #     - '0-1': endpoints are fixed to (0, 0) and (1, 0).
 
             verbose (bool):
                 Whether to print additional optimization result information.
@@ -820,79 +816,158 @@ class SplevBezier(ParametricCurve):
             method (str):
                 scipy.optimize.minimize optimization method to use.
 
-
         Returns:
             SplevBezier: Fitted Bézier curve.
+
+        Notes:
+            The main difference between "replace" and "append" for the end
+            points is that "replace" means they are still part of the potential
+            control_point_spacing definition, while "append" means they are not included in
+            this control_point_spacing, but added to the existing control_point_spacing.
+            If control_point_spacing is not defined or free, none of this matters.
+
+            this cost me my sanity
         """
+        if n_control_points is None and control_point_spacing is None:
+            raise ValueError(
+                "Either n_control_points or control_point_spacing must be specified."
+            )
         if points.ndim != 2 or points.shape[1] != 2:
             raise ValueError("points must be a 2D array with shape (N, 2).")
 
-        if isinstance(spacing, np.ndarray):
-            n_control_points = len(spacing)
+        if n_control_points is not None:
+            if isinstance(control_point_spacing, np.ndarray):
+                raise ValueError(
+                    "If n_control_points is specified, control_point_spacing "
+                    "must be a string defining type of spacing, not an array."
+                )
+            variable_control_points = n_control_points
+            for clamp in [start_clamp, end_clamp]:
+                if clamp is not None and clamp[1] == 'append':
+                    # total number of control points is increased by 1
+                    variable_control_points -= 1
 
-        # Check if there are enough points to fit the curve
-        if len(points) < n_control_points:
-            raise ValueError(
-                "Number of input points must be >= (len(n_control_points) + 1)."
-                + f"\n Got {len(points)} points, expected at least {len(n_control_points) + 1} for a curve with {n_control_points}."
-            )
+        # if control_point_spacing is not None:
+        if isinstance(control_point_spacing, np.ndarray):
+            n_control_points = len(control_point_spacing)
 
+        # ---- define the start point ----
+        if start_clamp is not None:
+            assert isinstance(start_clamp, tuple) and len(start_clamp) == 2, \
+                "start_clamp must be a tuple of (location, mode)."
+            assert start_clamp[1] in {'replace', 'append'}, \
+                "start_clamp mode must be either 'replace' or 'append'."
+            location, _ = start_clamp
+            if isinstance(location, str):
+                if location in {'data'}:
+                    start_point = points[0]
+                elif location in {'origin', '0', '0,0'}:
+                    start_point = Point2D([0, 0])
+                else:
+                    raise NotImplementedError(
+                        f"Unknown start_clamp location: {location}. "
+                        "Use 'data', 'origin', or a 2D (Point2D) array."
+                    )
+            elif isinstance(location, (np.ndarray, tuple, list)):
+                start_point = np.asarray(location).view(Point2D)
+                assert location.shape == (2,), \
+                    "start_clamp must be a 2D array with shape (2,)."
+        else:
+            # if no start point is defined, use the first point for control_point_spacing
+            start_point = points[0]
+
+        # ---- define the end point ----
+        if end_clamp is not None:
+            assert isinstance(end_clamp, tuple) and len(end_clamp) == 2, \
+                "end_clamp must be a tuple of (location, mode)."
+            assert end_clamp[1] in {'replace', 'append'}, \
+                "end_clamp mode must be either 'replace' or 'append'."
+            location, _ = end_clamp
+            if isinstance(location, str):
+                if location in {'data'}:
+                    end_point = points[-1]
+                elif location in {'1', '1,0'}:
+                    end_point = Point2D([1, 0])
+            elif isinstance(location, (np.ndarray, tuple, list)):
+                end_point = np.asarray(location).view(Point2D)
+                assert location.shape == (2,), \
+                    "end_clamp must be a 2D array with shape (2,)."
+        else:
+            # if no end point is defined, use the last point for control_point_spacing
+            end_point = points[-1]
+
+        # ---- account for appended endpoints ----
+        # if points are appended, account for that in the number of control
+        # points, as these should be excluded from the initial guess, but not
+        # influence the defined control_point_spacing (if it is defined)
+        # variable_control_points = n_control_points
+        # for clamp in [start_clamp, end_clamp]:
+        #     if clamp is not None and clamp[1] == 'append':
+        #         # total number of control points is increased by 1
+        #         n_control_points += 1
+
+        # ---- define init guess ----
+        # includes both x and y values. If only y values are used, the x values
+        # are taken out of the guess in the next step and replaced with control_point_spacing
         init_guess = points[
-            np.linspace(0, len(points) - 1, n_control_points, dtype=int)
+            np.linspace(0, len(points) - 1, variable_control_points, dtype=int)
         ]
 
-        if not isinstance(spacing, np.ndarray):
-            # adjust number of control points if endpoints are fixed
-            if start_clamp is not None:
-                n_control_points -= 1
-                init_guess = init_guess[1:]
-            if end_clamp is not None:
-                n_control_points -= 1
-                init_guess = init_guess[:-1]
 
-        if isinstance(start_clamp, (str, type(None))):
-            if start_clamp in {'data', None}:
-                start_point = points[0]
-            elif start_clamp in {'origin', '0'}:
-                start_point = Point2D([0, 0])
-        elif isinstance(start_clamp, (np.ndarray, tuple, list)):
-            start_point = np.asarray(start_clamp).view(Point2D)
-
-        if isinstance(end_clamp, (str, type(None))):
-            if end_clamp in {'data', None}:
-                end_point = points[-1]
-            elif end_clamp == '1':
-                end_point = Point2D([1, 0])
-        elif isinstance(end_clamp, (np.ndarray, tuple, list)):
-            end_point = np.asarray(end_clamp).view(Point2D)
-
-
-        if spacing is not None:
+        # ---- check control_point_spacing and adjust guess ----
+        if control_point_spacing is not None:
+            # x-locations are fixed so only y values matter
             init_guess = init_guess[:, 1]
-            if isinstance(spacing, np.ndarray):
-                if not len(spacing) == n_control_points:
-                    raise ValueError(
-                        "Length of spacing array must match number of control points. "
-                         + "make sure to subtract clamped points from the total number when defining the spacing"
-                    )
-                x_control_points = spacing
-            else:
-                match spacing:
+            if isinstance(control_point_spacing, np.ndarray):
+                x_control_points = control_point_spacing
+            elif isinstance(control_point_spacing, str):
+                match control_point_spacing:
                     case "cosine":
-                        x_control_points = cosine_spacing(start_point[0], end_point[0], n_control_points)
+                        x_control_points = cosine_spacing(start_point[0], end_point[0], variable_control_points)
                     case "linear":
-                        x_control_points = np.linspace(start_point[0], end_point[0], n_control_points)
+                        x_control_points = np.linspace(start_point[0], end_point[0], variable_control_points)
                     case "chebyshev":
-                        x_control_points = chebyshev_nodes(start_point[0], end_point[0], n_control_points)
+                        x_control_points = chebyshev_nodes(start_point[0], end_point[0], variable_control_points)
                     case _:
-                        raise ValueError("Invalid spacing method.")
-        else:
-            pass
-            # raise NotImplementedError(
-            #     "Spacing method not implemented. Use 'cosine', 'linear', or 'chebyshev'."
-            # )
+                        raise ValueError("Invalid control_point_spacing method.")
+            else:
+                raise ValueError(
+                    "control_point_spacing must be a numpy array or a string ('cosine', 'linear', 'chebyshev')."
+                )
 
+        # ---- account for replaced endpoints ----
+        # now with control_point_spacing and init guess defined with potential appended points
+        # taken into account, the next step is to adjust the number of control
+        # points and the initial guess if the ends are defined to be replaced
+        # instead of appended.
+        if start_clamp is not None and start_clamp[1] == 'replace':
+            variable_control_points -= 1
+            init_guess = init_guess[1:]
+            if control_point_spacing is not None:
+                x_control_points = x_control_points[1:]
+        if end_clamp is not None and end_clamp[1] == 'replace':
+            variable_control_points -= 1
+            init_guess = init_guess[:-1]
+            if control_point_spacing is not None:
+                x_control_points = x_control_points[:-1]
 
+        # ---- extra ----
+        # little warning if there are too few points for the number of control points
+        # if len(points) <= 2 * n_control_points:
+        #     warning(
+        #         f"Few datapoints for the chosen number of control points, might lead to poor fitting."
+        #         f"\n trying to fit {len(points)} points using {n_control_points} control points, "
+        #         f"while recommended would be at most {len(points)//2}."
+        #     )
+        if n_control_points > len(points):
+            # check b707b
+            # raise ValueError(
+            warning(
+                f"Number of control points ({n_control_points}) must be less than (or equal, apparently) the number of points ({len(points)})."
+                f"\n Otherwise, the curve will be overfitted."
+            )
+
+        # ---- Now the actual fitting ----
         def objective(flat_control_points: np.ndarray) -> np.ndarray:
             """Objective function for control point fitting optimization.
 
@@ -902,10 +977,12 @@ class SplevBezier(ParametricCurve):
             Returns:
                 np.ndarray: residuals between data points and curve points.
             """
-            if spacing is not None:
+            if control_point_spacing is not None:
+                # zip x and y values
                 control_points = np.column_stack((x_control_points, flat_control_points))
             else:
-                control_points = flat_control_points.reshape(-1, 2)  # unflatten
+                # unflatten the control points
+                control_points = flat_control_points.reshape(-1, 2)
 
             if start_clamp is not None:
                 control_points = np.vstack((start_point, control_points))
@@ -953,7 +1030,7 @@ class SplevBezier(ParametricCurve):
             constraints=constraints,
         )
 
-        if spacing is not None:
+        if control_point_spacing is not None:
             control_points = np.column_stack((x_control_points, result.x))
         else:
             control_points = result.x.reshape(-1, 2)  # unflatten
@@ -1201,7 +1278,7 @@ class SplevCBezier(BSpline2D):
         cls,
         points: np.ndarray,
         n_control_points: int = 12,
-        spacing: str | np.ndarray = "linear",
+        control_point_spacing: str | np.ndarray = "linear",
         w_damping: float = 1e-3,
         w_overlap: float = 1e3,
         clamp_origin: bool = True,
@@ -1234,10 +1311,10 @@ class SplevCBezier(BSpline2D):
                 control points will be 2*n+1, n for the upper surface, n for the
                 lower surface, and one explicitly in the origin (leading edge).
 
-            spacing (np.ndarray or str):
+            control_point_spacing (np.ndarray or str):
                 Predefined x-locations for control points in array (from [0,1],
                 without repeated points), or a string defining the type of
-                spacing used.
+                control_point_spacing used.
                 Defaults to "cosine".
 
             w_damping (float):
@@ -1296,12 +1373,12 @@ class SplevCBezier(BSpline2D):
                 + f"\n Got {len(points)} points, expected at least {2 * len(n_control_points) + 1} for a curve with {n_control_points}."
             )
 
-        # Check how spacing is defined, and generate x values accordingly
-        if isinstance(spacing, np.ndarray):
-            x_control_points = spacing
+        # Check how control_point_spacing is defined, and generate x values accordingly
+        if isinstance(control_point_spacing, np.ndarray):
+            x_control_points = control_point_spacing
 
-        elif isinstance(spacing, str):
-            # if the curve is not clamped to the origin, control point spacing
+        elif isinstance(control_point_spacing, str):
+            # if the curve is not clamped to the origin, control point control_point_spacing
             # must account for the non-normalized input data
             if not clamp_origin:
                 x_values = points.T[0]
@@ -1310,7 +1387,7 @@ class SplevCBezier(BSpline2D):
             else:
                 x_min = 0
                 x_max = 1
-            match spacing:
+            match control_point_spacing:
                 case "cosine":
                     x_control_points = cosine_spacing(x_min, x_max, variables_per_side)
                 case "linear":
