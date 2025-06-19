@@ -137,7 +137,7 @@ class AirfoilNormalizer:
                     raise ValueError(f"Unknown output type: {output}")
         else:
             raise TypeError("Input must be a numpy array or BSpline2D.")
-        
+
 
     @classmethod
     def _normalize_spline(cls, spline: BSpline2D,  find_trailing_edge: bool = False) -> BSpline2D:
@@ -267,7 +267,7 @@ class AirfoilNormalizer:
 
             # if the found max x locations coincide with the spline end points,
             # at least no funky stuff is going on, at most some missing points:
-            if np.allclose(res1_TE, spline_start, rtol=0) and np.allclose(res2_TE, spline_end, rtol=0):
+            if np.allclose(res1_TE, spline_start, rtol=0) and np.allclose(res2_TE, spline_end, rtol=1e-6):
                 # if the spline endpoints have the same x-coordinate,
                 # the trailing edge is assumed to be at the midpoint of
                 # the start and end points
@@ -303,6 +303,12 @@ class AirfoilNormalizer:
                 trailing_edge = spline.evaluate_at(u_te)
                 return trailing_edge
 
+            # if the x-locations are the same, but the y-locations are not,
+            # yet we end up here, the spline likely overshoots the trailing
+            # edge, but the trailing edge is can still be well defined.
+            elif np.allclose(res1_TE.x, res2_TE.x, rtol=1e-7) and not np.allclose(res1_TE.y, res2_TE.y, rtol=1e-7):
+                trailing_edge = 0.5 * (spline_start + spline_end)
+                return trailing_edge
             else:
                 # this is probably never reached. please let it never be reached.
                 raise ValueError(

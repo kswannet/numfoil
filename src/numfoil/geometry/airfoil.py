@@ -1160,7 +1160,12 @@ class BezierAirfoil(AirfoilBase):
 class CSTAirfoil(AirfoilBase):
     def __init__(
         self,
-        data_points: np.ndarray,
+        upper_coeficients: np.ndarray,
+        lower_coeficients: np.ndarray,
+        leading_edge_weight: float = 0.0,
+        trailing_edge_weight: float = 0.0,
+        trialing_edge_thickness: float = 0.0,
+        data_points: np.ndarray = None,
         name: str = None,
         full_name: str = None,
         normalize: bool = True,
@@ -1175,7 +1180,13 @@ class CSTAirfoil(AirfoilBase):
         self.full_name = full_name or name
 
     @classmethod
-    def from_array(cls, points: np.ndarray, name: str = None):
+    def from_coordinate_array(
+        cls,
+        points: np.ndarray,
+        normalize: bool = True,
+        name: str = None,
+        description: str = None,
+    ):
         """Creates an Airfoil object from an array of points.
         Mainly used for input validation.
 
@@ -1193,14 +1204,31 @@ class CSTAirfoil(AirfoilBase):
             raise TypeError("Input must be a numpy array.")
         if points.shape[1] != 2:
             raise ValueError("Input array must have shape (n, 2).")
-        # normalized_points = AirfoilProcessor.normalize(points)
+
+        if normalize:
+            points = AirfoilNormalizer.normalize(points, find_trailing_edge=True, output="points").T
+            # make sure the leading edge is included in the normalized
+            # points. this should not alter the curve in any way, as the
+            # origin should part of it after normalization. This simply adds
+            # a point on the curve, or moves one along it.
+            if len(points) % 2 == 1:
+                points[len(points) // 2] = np.array([0.0, 0.0])
+            elif len(points) % 2 == 0:
+                np.insert(points, len(points) // 2, [0.0, 0.0], axis=0)
+
         return cls(
             data_points=points,
             name=name
         )
 
     @classmethod
-    def from_file(cls, filepath: str):
+    def from_file(
+        cls,
+        filepath: str,
+        normalize: bool = True,
+        data_type: str = "coordinates",
+        **kwargs: dict
+    ):
         """Returns an Airfoil object from a data file.
         Coordinates are normalized before passing to the Airfoil object.
 
@@ -1214,11 +1242,24 @@ class CSTAirfoil(AirfoilBase):
             Airfoil: Airfoil object initialized with data from file.
         """
         datafile = AirfoilDataFile(filepath)
-        return cls(
-            data_points=datafile.points,
-            name=datafile.filename,
-            full_name=datafile.header,
-        )
+        match data_type:
+            case "coordinates":
+                return cls.from_coordinate_array(
+                    datafile.points,
+                    name=datafile.filename,
+                    description=datafile.header,
+                    normalize=normalize,
+                    **kwargs
+                )
+            case "control_points":
+                return cls.from_control_points(
+                    datafile.points,
+                    name=datafile.filename,
+                    description=datafile.header,
+                    **kwargs,
+                )
+            case _:
+                raise ValueError(f"Unknown data type: {data_type}")
 
     # TODO add option for other curve types
     @cached_property
@@ -1281,57 +1322,7 @@ class CSTAirfoil(AirfoilBase):
         camber = 0.5 * (y_upper + y_lower)
         return CSTCurve.fit(camber, num_coefficients=6, n1=1.0, n2=1.0,)
 
-    def camber_at(self, x: Union[float, np.ndarray]) -> np.ndarray:
-        """Returns the camber at specified x locations."""
-        return self.camber_line(x)
 
-    @property
-    def cambered(self) -> bool:
-        return True if self.max_camber[1] > 0 else False
-
-    def thickness_at(self, x: Union[float, np.ndarray]) -> np.ndarray:
-        """Calculates the thickness at specified x locations."""
-        y_upper = self.upper_surface(x)
-        y_lower = self.lower_surface(x)
-        return y_upper - y_lower
-
-    def plot(self, n_points: int = 200, show: bool = True):
-        """Plots the airfoil geometry."""
-        x = np.linspace(0, 1, n_points)
-        y_upper = self.upper_surface(x)
-        y_lower = self.lower_surface(x)
-        y_camber = self.camber_line(x)
-
-        fig, ax = plt.subplots()
-        ax.plot(x, y_upper, label="Upper Surface")
-        ax.plot(x, y_lower, label="Lower Surface")
-        ax.plot(x, y_camber, label="Camber Line", linestyle="--")
-        ax.set_aspect("equal", adjustable="box")
-        ax.legend()
-        if show:
-            plt.show()
-
-        return fig, ax
-
-    @property
-    def max_thickness(self) -> Tuple[float, float]:
-        """Finds the location and value of maximum thickness."""
-        result = opt.minimize(
-            lambda x: -self.thickness_at(x), 0.5, bounds=[(0, 1)]
-        )
-        if result.success:
-            return result.x[0], -result.fun
-        else:
-            raise RuntimeError("Failed to find maximum thickness.")
-
-    @property
-    def max_camber(self) -> Tuple[float, float]:
-        """Finds the location and value of maximum camber."""
-        result = opt.minimize(lambda x: -self.camber_at(x), 0.5, bounds=[(0, 1)])
-        if result.success:
-            return result.x[0], -result.fun
-        else:
-            raise RuntimeError("Failed to find maximum camber.")
 
 
 class NACA4Airfoil(AirfoilBase):

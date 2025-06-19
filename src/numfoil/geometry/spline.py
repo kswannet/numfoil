@@ -1541,7 +1541,6 @@ class SplevCBezier(BSpline2D):
         return cls([knot_vector, control_points.T, degree], points)
 
 
-
 class CSTCurve(Curve):
     """
     A class representing a single-valued CST curve: y(x).
@@ -1575,9 +1574,9 @@ class CSTCurve(Curve):
         self.coefficients = np.array(coefficients, dtype=float)
 
         # Polynomial degree (number of Bernstein terms)
-        self.n = len(coefficients) - 1
+        self.n_coefficients = len(coefficients) - 1
         # index vector for Bernstein polynomials
-        self.k_vec = np.arange(self.n + 1)
+        self.k_vec = np.arange(self.n_coefficients + 1)
 
     def class_function(self, x: np.ndarray) -> np.ndarray:
         """Class function for CST curve.
@@ -1602,7 +1601,7 @@ class CSTCurve(Curve):
         Returns:
             list: List of binomial coefficients.
         """
-        return comb(self.n, self.k_vec)
+        return comb(self.n_coefficients, self.k_vec)
 
     def bernstein_basis(self, x: np.ndarray) -> np.ndarray:
         """Calculate the Bernstein polynomial.
@@ -1620,9 +1619,9 @@ class CSTCurve(Curve):
                 Shape (N, n+1) where column k is B_k(x).
         """
         x = np.array(x).reshape(-1, 1) # if np.array(x).ndim == 1 else x
-        return np.power(x, self.k_vec) * np.power(1.0 - x, self.n - self.k_vec)
+        return np.power(x, self.k_vec) * np.power(1.0 - x, self.n_coefficients - self.k_vec)
 
-    def weighted_basis_matrix (self, x: np.ndarray) -> np.ndarray:
+    def weighted_basis_matrix(self, x: np.ndarray) -> np.ndarray:
         """Construct the weighted Bernstein Basis matrix.
 
         :math:`M(x) = C(x) * B(x) * binom_coeffs`
@@ -1789,7 +1788,7 @@ class CSTCurve(Curve):
             * (
                 self.k_vec
                 * np.power(x, self.k_vec - 1)
-                * np.power(1 - x, self.n - self.k_vec)
+                * np.power(1 - x, self.n_coefficients - self.k_vec)
             ),
             axis=-1,
         )
@@ -1812,7 +1811,7 @@ class CSTCurve(Curve):
             * self.binomial_weights
             * self.k_vec * (self.k_vec - 1)
             * np.power(x, self.k_vec - 2)
-            * np.power(1 - x, self.n - self.k_vec),
+            * np.power(1 - x, self.n_coefficients - self.k_vec),
             axis=-1,
         )
 
