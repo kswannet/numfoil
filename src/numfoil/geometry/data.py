@@ -306,7 +306,7 @@ class AirfoilNormalizer:
             # if the x-locations are the same, but the y-locations are not,
             # yet we end up here, the spline likely overshoots the trailing
             # edge, but the trailing edge is can still be well defined.
-            elif np.allclose(res1_TE.x, res2_TE.x, rtol=1e-7) and not np.allclose(res1_TE.y, res2_TE.y, rtol=1e-7):
+            elif np.allclose(res1_TE.x, res2_TE.x, rtol=1e-6):# and not np.allclose(res1_TE.y, res2_TE.y, rtol=1e-7):
                 trailing_edge = 0.5 * (spline_start + spline_end)
                 return trailing_edge
             else:
