@@ -159,7 +159,7 @@ class AirfoilNormalizer:
         spline = cls._force_trailing_edge_at_x1(spline, target="1")
 
         # recompute
-        leading_edge, trailing_edge, u_leading_edge = cls._find_leading_trailing_edges(spline,  find_trailing_edge=find_trailing_edge)
+        leading_edge, trailing_edge, u_leading_edge = cls._find_leading_trailing_edges(spline,  find_trailing_edge=False)
 
         # append additional information
         spline.leading_edge = leading_edge
