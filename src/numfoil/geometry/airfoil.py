@@ -286,7 +286,7 @@ class AirfoilBase(ABC):
         return np.vstack([
             np.column_stack([x, self.upper_surface_at(x)])[::-1],
             np.column_stack([x, self.lower_surface_at(x)])[1:],
-        ])
+        ]).view(Point2D)
 
     def plot(self, n_points=1000):
         """Plots the airfoil geometry."""
@@ -295,7 +295,11 @@ class AirfoilBase(ABC):
         ax.plot(x, self.upper_surface_at(x), label="Upper Surface")
         ax.plot(x, self.lower_surface_at(x), label="Lower Surface")
         ax.plot(x, self.camber_at(x), label="Camber Line")
-        ax.set_title(self.description or self.name or "Airfoil")
+        ax.set_title(
+            self.description.replace("#", "") \
+            or self.name \
+            or "Airfoil"
+        )
         ax.set_aspect("equal", adjustable="box")
         ax.legend(loc="best")
         ax.set_ylim(-0.4, 0.4)
@@ -727,16 +731,24 @@ class BezierAirfoil(AirfoilBase):
         if normalize:
             normalized_bspline = AirfoilNormalizer.normalize(points, find_trailing_edge=find_trailing_edge)
             # If the bspline fits poorly and causes overlap, us the original points
-            if np.any(normalized_bspline.evaluate_at(np.linspace(0, normalized_bspline.u_leading_edge, 1000)).y - normalized_bspline.evaluate_at(np.linspace(normalized_bspline.u_leading_edge, 1, 1000)).y < 0):
-                points = AirfoilNormalizer.normalize(points, find_trailing_edge=find_trailing_edge, output="points").T
+            if np.any((normalized_bspline.evaluate_at(np.linspace(0, normalized_bspline.u_leading_edge, 1000)).y - normalized_bspline.evaluate_at(np.linspace(normalized_bspline.u_leading_edge, 1, 1000)).y).round(8) < 0):
+                points = AirfoilNormalizer.normalize(points, find_trailing_edge=find_trailing_edge, output="points").T.round(8)
                 # make sure the leading edge is included in the normalized
                 # points. this should not alter the curve in any way, as the
                 # origin should part of it after normalization. This simply adds
                 # a point on the curve, or moves one along it.
-                if len(points) % 2 == 1:
-                    points[len(points) // 2] = np.array([0.0, 0.0])
-                elif len(points) % 2 == 0:
-                    np.insert(points, len(points) // 2, [0.0, 0.0], axis=0)
+                #if len(points) % 2 == 1:
+                #    points[len(points) // 2] = np.array([0.0, 0.0])
+                #elif len(points) % 2 == 0:
+                #    np.insert(points, len(points) // 2, [0.0, 0.0], axis=0)
+                    # If origin is already present, do nothing
+                if np.any(np.all(np.isclose(points, [0.0, 0.0], atol=1e-8), axis=1)):
+                    return points
+                # Find index of point with smallest x (leading edge region)
+                i_le = np.argmin(points[:, 0])
+                # Ensure it's between upper and lower surfaces
+                # Insert [0, 0] *before* i_le if it's the first lower surface point
+                points = np.insert(points, i_le if points[i_le, 1] < 0 else i_le + 1, np.array([0.0, 0.0]), axis=0)
 
                 if fit_method == "split_t_c":
                     warning(
@@ -799,7 +811,7 @@ class BezierAirfoil(AirfoilBase):
                         },
                         {   # ensure first y value > 0.002 when spacing is free
                             "type": "ineq",
-                            "fun": lambda y: y.reshape(-1, 2)[0, 1] - 0.001
+                            "fun": lambda y: y.reshape(-1, 2)[0, 1] - 0.002
                         },
                         {   # ensure second y value > y1 when spacing is free
                             "type": "ineq",
@@ -839,7 +851,7 @@ class BezierAirfoil(AirfoilBase):
                         },
                         {   # ensure first y value > 0.002 when spacing is free
                             "type": "ineq",
-                            "fun": lambda y: -y.reshape(-1, 2)[0, 1] - 0.001
+                            "fun": lambda y: -y.reshape(-1, 2)[0, 1] - 0.002
                         },
                         {   # ensure second y value > y1 when spacing is free
                             "type": "ineq",
@@ -1011,8 +1023,6 @@ class BezierAirfoil(AirfoilBase):
                     datafile.points,
                     name=datafile.filename,
                     description=datafile.header,
-                    curvefit_kwargs=curvefit_kwargs,
-                    **kwargs,
                 )
             case _:
                 raise ValueError(f"Unknown data type: {data_type}")

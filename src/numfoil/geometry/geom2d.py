@@ -19,6 +19,8 @@ from __future__ import annotations
 from typing import Sequence, Tuple, Union
 
 import numpy as np
+import matplotlib.pyplot as plt
+
 
 __all__ = [
     "Point2D",
@@ -82,6 +84,17 @@ class Point2D(Geom2D):
             return super().__sub__(other).view(Vector2D)
         else:
             return super().__sub__(other)
+
+    def plot(self):
+        """Plots the :py:class:`Point2D` object."""
+        plt.figure()
+        plt.plot(self.x, self.y, '--o', markersize=5, label="Point2D")
+        plt.xlabel("X-axis")
+        plt.ylabel("Y-axis")
+        plt.title("Point2D array Plot")
+        plt.grid()
+        plt.show()
+
 
 
 class Vector2D(Geom2D):

@@ -359,7 +359,7 @@ class BSpline2D(ParametricCurve):
         Returns:
             ndarray: The evaluated point(s) on the spline.
         """
-        return np.asarray(si.splev(u, self.spline, der=0), dtype=np.float64).T.view(Point2D)
+        return np.asarray(si.splev(u, self.spline, der=0), dtype=np.float64).T.view(Point2D)#.round(8)
 
     def first_deriv_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
         """
@@ -731,7 +731,7 @@ class  SplevBezier(ParametricCurve):
         Returns:
             ndarray: The evaluated point(s) on the spline.
         """
-        return np.asarray(si.splev(u, self.spline, der=0), dtype=np.float64).T.view(Point2D)
+        return np.asarray(si.splev(u, self.spline, der=0), dtype=np.float64).T.view(Point2D)#.round(8)
 
     def first_deriv_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
         """
@@ -1043,9 +1043,8 @@ class  SplevBezier(ParametricCurve):
         if verbose:
             print(result)
         if not result.success:
-            print(result)
             raise ValueError(
-                f"failed to find u, optimization success {result.success} \n"
+                f"failed to find control points, \n"
                 + f"{result.message}"
                 )
 
@@ -1672,7 +1671,7 @@ class CSTCurve(Curve):
             raise ValueError("x must be in the range [0, 1]")
 
         y = self.class_function(x) * self.shape_function(x)
-        return np.array([x, y]).T.view(Point2D)
+        return np.array([x, y]).T.view(Point2D)#.round(8)
 
     def __call__(self, x: float | np.ndarray) -> float | np.ndarray:
         """
@@ -1941,7 +1940,7 @@ class CSTAirfoilSurface:
             y = np.zeros_like(x)
             y[u <= 0.5] = self.upper_part(x[u <= 0.5])
             y[u >= 0.5] = self.lower_part(x[u >= 0.5])
-        return np.array([x, y]).T.view(Point2D)
+        return np.array([x, y]).T.view(Point2D)#.round(8)
 
     def __call__(self, u):
         return self.evaluate_at(u)
