@@ -481,7 +481,7 @@ class AirfoilNormalizer:
         def objective(u):
             return -np.linalg.norm(trailing_edge - spline.evaluate_at(u))
 
-        res = opt.minimize(objective, 0.5, bounds=[(0, 1)])
+        res = opt.minimize(objective, 0.5, bounds=[(0, 1)], method="SLSQP")
         if not res.success:
             raise RuntimeError("Failed to find leading edge. \n" + str(res))
         return spline.evaluate_at(res.x[0]), res.x[0]
