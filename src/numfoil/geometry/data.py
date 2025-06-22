@@ -6,6 +6,8 @@ import scipy.optimize as opt
 from .spline import BSpline2D, SplevCBezier
 from .geom2d import Point2D, Geom2D
 import os
+from tqdm import tqdm
+
 
 
 class AirfoilDataFile:
@@ -552,3 +554,49 @@ class TransformedArray(Point2D):
     def rotation(self) -> float:
         """Returns the applied rotation angle in radians."""
         return self.transformation[2]
+
+
+def normalize_airfoils(original_dir: str = "UIUC_airfoils/original", output_dir: str = "UIUC_airfoils/smoothed"):
+    from numfoil.geometry.airfoil import BezierAirfoil
+    """Smoothens and normalizes given airfoil coordinate data.
+    Nornalizes the data using an interpolating Bspline, then smoothens by
+    fitting Bezier curves with as high a number of control points as
+    possible. if fitting falls, the number of control points is reduced until
+    a fit is found or the number of control points is reduced to 6, after which
+    point this function (and I) gives up.
+
+    Args:
+        original_dir (str): Directory containing the original airfoil data files.
+        output_dir (str): Directory where the converted Bezier airfoil files will be saved.
+    """
+    if not os.path.exists(original_dir):
+        raise FileNotFoundError(f"Original directory {original_dir} does not exist.")
+    if not os.path.isdir(original_dir):
+        raise NotADirectoryError(f"Original directory {original_dir} is not a directory.")
+    os.makedirs(output_dir, exist_ok=True)
+
+    files = os.listdir(original_dir)
+
+    for idx, file in enumerate(tqdm(files, total=len(files), ncols=100, unit="file", desc="Loading Airfoils")):
+        success = False
+        curvefit_kwargs = {
+            "n_control_points": 20,
+        }
+        while not success:
+            try:
+                airfoil = BezierAirfoil.from_file(
+                    os.path.join(original_dir, file),
+                    curvefit_kwargs=curvefit_kwargs
+                )
+                filename = os.path.join(output_dir, f"{airfoil.name}.dat")
+                np.savetxt(filename, airfoil.points, fmt="%.6f", header=airfoil.description, comments="")
+                success = True
+
+            except Exception:
+                print(f"\nFailed to fit {file} with n={curvefit_kwargs['n_control_points']}, trying with n={curvefit_kwargs['n_control_points'] - 1}")
+                if curvefit_kwargs["n_control_points"] < 6:
+                    print(f"\nFailed to fit {file} with n={curvefit_kwargs['n_control_points']}, giving up.")
+                    break
+                curvefit_kwargs = {
+                    "n_control_points": curvefit_kwargs["n_control_points"] - 1,
+                }

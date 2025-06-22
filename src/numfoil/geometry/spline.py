@@ -1042,7 +1042,7 @@ class  SplevBezier(ParametricCurve):
 
         if verbose:
             print(result)
-        if not result.success:
+        if not result.success or result.fun > 1e-1:
             raise ValueError(
                 f"failed to find control points, \n"
                 + f"{result.message}"
