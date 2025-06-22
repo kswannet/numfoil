@@ -85,13 +85,15 @@ class Point2D(Geom2D):
         else:
             return super().__sub__(other)
 
-    def plot(self):
+    def plot(self, fmt='--o', *args, **kwargs):
         """Plots the :py:class:`Point2D` object."""
+        kwargs.setdefault('markersize', 3)       # Default marker size
+        kwargs.setdefault('linewidth', 1)      # Default line width
         plt.figure()
-        plt.plot(self.x, self.y, '--o', markersize=5, label="Point2D")
+        plt.plot(self.x, self.y, fmt, *args, **kwargs)
         plt.xlabel("X-axis")
         plt.ylabel("Y-axis")
-        plt.title("Point2D array Plot")
+        plt.title("Point2D Array")
         plt.grid(True)
         plt.show()
 
