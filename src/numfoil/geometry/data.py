@@ -241,8 +241,8 @@ class AirfoilNormalizer:
             tell whether there is some other stupid edgecase), but at what cost.
         """
         if find_trailing_edge:
-            res1 = opt.minimize(lambda u: -np.linalg.norm(spline.evaluate_at(u)[0]), 0, bounds=[(0, 1)])
-            res2 = opt.minimize(lambda u: -np.linalg.norm(spline.evaluate_at(u)[0]), 1, bounds=[(0, 1)])
+            res1 = opt.minimize(lambda u: -np.linalg.norm(spline.evaluate_at(u)[0]), 0, bounds=[(0, 1)], method="SLSQP")
+            res2 = opt.minimize(lambda u: -np.linalg.norm(spline.evaluate_at(u)[0]), 1, bounds=[(0, 1)], method="SLSQP")
             # res1 = opt.minimize(lambda u: -spline.evaluate_at(u)[0][0], 0, bounds=[(0, 1)])
             # res2 = opt.minimize(lambda u: -spline.evaluate_at(u)[0][0], 1, bounds=[(0, 1)])
 
@@ -267,7 +267,7 @@ class AirfoilNormalizer:
 
             # if the found max x locations coincide with the spline end points,
             # at least no funky stuff is going on, at most some missing points:
-            if np.allclose(res1_TE, spline_start, rtol=0) and np.allclose(res2_TE, spline_end, rtol=1e-6):
+            if np.allclose(res1_TE, spline_start, rtol=1e-6) and np.allclose(res2_TE, spline_end, rtol=1e-6):
                 # if the spline endpoints have the same x-coordinate,
                 # the trailing edge is assumed to be at the midpoint of
                 # the start and end points
@@ -279,13 +279,7 @@ class AirfoilNormalizer:
                 # the spline is incomplete, and the trailing edge is assumed to be
                 # at the maximum x-value found, while the other side is missing
                 # data.
-                else:  # elif abs(spline_start.x - spline_end.x) > 1e-6:
-                    # check we're not dealing with a degenerate monstrosity
-                    # assert np.all(res1_TE == spline_start), \
-                    #     "The first control point does not coincide with u=0 after optimization."
-                    # assert np.all(res2_TE == spline_end), \
-                    #     "The last control point does not coincide with u=1 after optimization."
-
+                else:
                     # first fix the trailing edge
                     spline = cls._force_trailing_edge_at_x1(spline, target="xmax")
                     # at this point, the trailing edge should be fine, but imma
@@ -296,19 +290,28 @@ class AirfoilNormalizer:
                     trailing_edge = 0.5 * (spline_start + spline_end)
                     return trailing_edge
 
+            # if the x-locations are the close,
+            # yet we end up here, the spline likely overshoots the trailing
+            # edge, but the trailing edge is can still be well defined.
+            # checks: found x locations are close, y-coordinates are mirrored,
+            # and the spline start and end points have the same x-coordinate.
+            # Should be a good indicator that the spline overshoots the trailing
+            # edge in the points, and then doubles back to it with both upper
+            # and lower parts of the surface
+            elif np.isclose(res1_TE.x, res2_TE.x, rtol=1e-4, atol=1e-4) \
+                    and np.isclose(res1_TE.y, -res2_TE.y, rtol=1e-4, atol=1e-3) \
+                    and np.isclose(spline_start.x, spline_end.x, rtol=1e-4, atol=1e-4):
+                trailing_edge = 0.5 * (spline_start + spline_end)
+                return trailing_edge
+
             # if x-locations are not the same, trailing edge is assumed to be
             # at the maximum x-value found, while the other side is missing data
-            elif abs(res1_TE.x - res2_TE.x) > 1e-6:
+            # and the data is causing the spline to overshoot the trailing edge.
+            elif not np.isclose(res1_TE.x, res2_TE.x, rtol=1e-4, atol=1e-4):
                 u_te = res1.x[0] if -res1.fun > -res2.fun else res2.x[0]
                 trailing_edge = spline.evaluate_at(u_te)
                 return trailing_edge
 
-            # if the x-locations are the same, but the y-locations are not,
-            # yet we end up here, the spline likely overshoots the trailing
-            # edge, but the trailing edge is can still be well defined.
-            elif np.allclose(res1_TE.x, res2_TE.x, rtol=1e-6):# and not np.allclose(res1_TE.y, res2_TE.y, rtol=1e-7):
-                trailing_edge = 0.5 * (spline_start + spline_end)
-                return trailing_edge
             else:
                 # this is probably never reached. please let it never be reached.
                 raise ValueError(

@@ -92,7 +92,7 @@ class Point2D(Geom2D):
         plt.xlabel("X-axis")
         plt.ylabel("Y-axis")
         plt.title("Point2D array Plot")
-        plt.grid()
+        plt.grid(True)
         plt.show()
 
 
