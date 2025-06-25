@@ -94,7 +94,7 @@ class Curve(ABC):
         plt.plot(*self.evaluate_at(np.linspace(0,1,num_points)).T)
         plt.xlabel("X")
         plt.ylabel("Y")
-        plt.show()
+        plt.show(block=False)
 
     # @staticmethod
     # def arc_lengths(points: np.ndarray, normalize: bool = True) -> np.ndarray:
@@ -1042,7 +1042,15 @@ class  SplevBezier(ParametricCurve):
 
         if verbose:
             print(result)
-        if not result.success or result.fun > 1e-1:
+
+        elif result.success and result.fun > 2e-2:
+            # ! this looks like it didnt go well, check the result
+            print("Result fun value is high, indicating a poor fit.")
+            test = cls(control_points, points)
+            test.plot()
+            plt.plot(*points.T, 'o', label='data points')
+            # breakpoint()
+        # if not result.success:
             raise ValueError(
                 f"failed to find control points, \n"
                 + f"{result.message}"

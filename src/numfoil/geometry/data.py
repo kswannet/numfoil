@@ -7,7 +7,7 @@ from .spline import BSpline2D, SplevCBezier
 from .geom2d import Point2D, Geom2D
 import os
 from tqdm import tqdm
-
+import matplotlib.pyplot as plt
 
 
 class AirfoilDataFile:
@@ -243,8 +243,8 @@ class AirfoilNormalizer:
             tell whether there is some other stupid edgecase), but at what cost.
         """
         if find_trailing_edge:
-            res1 = opt.minimize(lambda u: -np.linalg.norm(spline.evaluate_at(u)[0]), 0, bounds=[(0, 1)], method="SLSQP")
-            res2 = opt.minimize(lambda u: -np.linalg.norm(spline.evaluate_at(u)[0]), 1, bounds=[(0, 1)], method="SLSQP")
+            res1 = opt.minimize(lambda u: -np.linalg.norm(spline.evaluate_at(u).x), 0, bounds=[(0, 1)], method="SLSQP")
+            res2 = opt.minimize(lambda u: -np.linalg.norm(spline.evaluate_at(u).x), 1, bounds=[(0, 1)], method="SLSQP")
             # res1 = opt.minimize(lambda u: -spline.evaluate_at(u)[0][0], 0, bounds=[(0, 1)])
             # res2 = opt.minimize(lambda u: -spline.evaluate_at(u)[0][0], 1, bounds=[(0, 1)])
 
@@ -309,18 +309,32 @@ class AirfoilNormalizer:
             # if x-locations are not the same, trailing edge is assumed to be
             # at the maximum x-value found, while the other side is missing data
             # and the data is causing the spline to overshoot the trailing edge.
-            elif not np.isclose(res1_TE.x, res2_TE.x, rtol=1e-4, atol=1e-4):
+            # elif not np.isclose(res1_TE.x, res2_TE.x, rtol=1e-4, atol=1e-4):
+            else:
+                # idk anymore man... is this then the final stop which
+                # accounts for all the other bullshit data out there?
                 u_te = res1.x[0] if -res1.fun > -res2.fun else res2.x[0]
                 trailing_edge = spline.evaluate_at(u_te)
+                # ! This must be verified, might be some points that need deleting
+                # ! verify the trailing edge point makes sense
+                spline.plot()
+                plt.plot(*spline.points.T, 'bo', markersize=5, label="points")
+                plt.plot(*spline_start, 'o', markersize=3, label="spline start")
+                plt.plot(*spline_end, 'o', markersize=3, label="spline end")
+                plt.plot(*res1_TE, '*', label="res1 TE")
+                plt.plot(*res2_TE, '*', label="res2 TE")
+                plt.plot(*trailing_edge, 'rx', label="trailing edge")
+                plt.legend()
+                breakpoint()
                 return trailing_edge
+            # else:
+            #     # this is probably never reached. please let it never be reached.
+            #     raise ValueError(
+            #         f"Unable to determine trailing edge. \n" +
+            #         f"Start: {spline_start}, End: {spline_end}, u1: {res1.x[0]}, u2: {res2.x[0]} \n" +
+            #         f"{res1} \n {res2}"
+            #         )
 
-            else:
-                # this is probably never reached. please let it never be reached.
-                raise ValueError(
-                    f"Unable to determine trailing edge. \n" +
-                    f"Start: {spline_start}, End: {spline_end}, u1: {res1.x[0]}, u2: {res2.x[0]} \n" +
-                    f"{res1} \n {res2}"
-                    )
 
             # # if x-locations are not the same, trailing edge is assumed to be
             # # at the maximum x-value found, while the other side is missing data
@@ -556,7 +570,7 @@ class TransformedArray(Point2D):
         return self.transformation[2]
 
 
-def normalize_airfoils(original_dir: str = "UIUC_airfoils/original", output_dir: str = "UIUC_airfoils/smoothed"):
+def normalize_airfoil_dir(original_dir: str = "UIUC_airfoils/original", output_dir: str = "UIUC_airfoils/smoothed"):
     from numfoil.geometry.airfoil import BezierAirfoil
     """Smoothens and normalizes given airfoil coordinate data.
     Nornalizes the data using an interpolating Bspline, then smoothens by
