@@ -6,6 +6,8 @@ import scipy.optimize as opt
 from .spline import BSpline2D, SplevCBezier
 from .geom2d import Point2D, Geom2D
 import os
+from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 
 class AirfoilDataFile:
@@ -57,7 +59,7 @@ class AirfoilDataFile:
         """Returns file header.
 
         Returns:
-            str | None: The header lines as a single multi‐line string.
+            str | None: The header lines as a single multi-line string.
         """
         if self.num_header_lines == 0:
             return None
@@ -202,9 +204,20 @@ class AirfoilNormalizer:
     @staticmethod
     def _remove_consecutive_duplicates(points: np.ndarray) -> np.ndarray:
         """Removes consecutive duplicate points from the array."""
-        diff = np.diff(points, axis=0)
-        idx = np.where(np.any(diff != 0, axis=1))[0] + 1
-        return np.vstack([points[0], points[idx]])
+        # # this one checks for exact duplicates
+        # diff = np.diff(points, axis=0)
+        # idx = np.where(np.any(diff != 0, axis=1))[0] + 1
+        # # this one checks for duplicates in x, regardless of y
+        # x_diff = np.diff(points[:, 0])
+        # idx = np.where(x_diff != 0)[0] + 1
+        # return np.vstack([points[0], points[idx]])
+        # # new version that should also fix manually closed trailing edges
+        x, y = points[:, 0], points[:, 1]
+        mask = np.ones(len(points), dtype=bool)
+        for i in np.where(np.isclose(np.diff(x), 0))[0]:
+            mask[i + (abs(y[i + 1]) < abs(y[i]))] = False
+        return points[mask]
+
 
     @staticmethod
     def _remove_overshoots(points: np.ndarray) -> np.ndarray:
@@ -241,8 +254,8 @@ class AirfoilNormalizer:
             tell whether there is some other stupid edgecase), but at what cost.
         """
         if find_trailing_edge:
-            res1 = opt.minimize(lambda u: -np.linalg.norm(spline.evaluate_at(u)[0]), 0, bounds=[(0, 1)], method="SLSQP")
-            res2 = opt.minimize(lambda u: -np.linalg.norm(spline.evaluate_at(u)[0]), 1, bounds=[(0, 1)], method="SLSQP")
+            res1 = opt.minimize(lambda u: -np.linalg.norm(spline.evaluate_at(u).x), 0, bounds=[(0, 1)], method="SLSQP")
+            res2 = opt.minimize(lambda u: -np.linalg.norm(spline.evaluate_at(u).x), 1, bounds=[(0, 1)], method="SLSQP")
             # res1 = opt.minimize(lambda u: -spline.evaluate_at(u)[0][0], 0, bounds=[(0, 1)])
             # res2 = opt.minimize(lambda u: -spline.evaluate_at(u)[0][0], 1, bounds=[(0, 1)])
 
@@ -307,18 +320,32 @@ class AirfoilNormalizer:
             # if x-locations are not the same, trailing edge is assumed to be
             # at the maximum x-value found, while the other side is missing data
             # and the data is causing the spline to overshoot the trailing edge.
-            elif not np.isclose(res1_TE.x, res2_TE.x, rtol=1e-4, atol=1e-4):
+            # elif not np.isclose(res1_TE.x, res2_TE.x, rtol=1e-4, atol=1e-4):
+            else:
+                # idk anymore man... is this then the final stop which
+                # accounts for all the other bullshit data out there?
                 u_te = res1.x[0] if -res1.fun > -res2.fun else res2.x[0]
                 trailing_edge = spline.evaluate_at(u_te)
+                # ! This must be verified, might be some points that need deleting
+                # ! verify the trailing edge point makes sense
+                spline.plot()
+                plt.plot(*spline.points.T, 'bo', markersize=5, label="points")
+                plt.plot(*spline_start, 'o', markersize=3, label="spline start")
+                plt.plot(*spline_end, 'o', markersize=3, label="spline end")
+                plt.plot(*res1_TE, '*', label="res1 TE")
+                plt.plot(*res2_TE, '*', label="res2 TE")
+                plt.plot(*trailing_edge, 'rx', label="trailing edge")
+                plt.legend()
+                breakpoint()
                 return trailing_edge
+            # else:
+            #     # this is probably never reached. please let it never be reached.
+            #     raise ValueError(
+            #         f"Unable to determine trailing edge. \n" +
+            #         f"Start: {spline_start}, End: {spline_end}, u1: {res1.x[0]}, u2: {res2.x[0]} \n" +
+            #         f"{res1} \n {res2}"
+            #         )
 
-            else:
-                # this is probably never reached. please let it never be reached.
-                raise ValueError(
-                    f"Unable to determine trailing edge. \n" +
-                    f"Start: {spline_start}, End: {spline_end}, u1: {res1.x[0]}, u2: {res2.x[0]} \n" +
-                    f"{res1} \n {res2}"
-                    )
 
             # # if x-locations are not the same, trailing edge is assumed to be
             # # at the maximum x-value found, while the other side is missing data
@@ -552,3 +579,49 @@ class TransformedArray(Point2D):
     def rotation(self) -> float:
         """Returns the applied rotation angle in radians."""
         return self.transformation[2]
+
+
+def normalize_airfoil_dir(original_dir: str = "UIUC_airfoils/original", output_dir: str = "UIUC_airfoils/smoothed"):
+    from numfoil.geometry.airfoil import BezierAirfoil
+    """Smoothens and normalizes given airfoil coordinate data.
+    Nornalizes the data using an interpolating Bspline, then smoothens by
+    fitting Bezier curves with as high a number of control points as
+    possible. if fitting falls, the number of control points is reduced until
+    a fit is found or the number of control points is reduced to 6, after which
+    point this function (and I) gives up.
+
+    Args:
+        original_dir (str): Directory containing the original airfoil data files.
+        output_dir (str): Directory where the converted Bezier airfoil files will be saved.
+    """
+    if not os.path.exists(original_dir):
+        raise FileNotFoundError(f"Original directory {original_dir} does not exist.")
+    if not os.path.isdir(original_dir):
+        raise NotADirectoryError(f"Original directory {original_dir} is not a directory.")
+    os.makedirs(output_dir, exist_ok=True)
+
+    files = os.listdir(original_dir)
+
+    for idx, file in enumerate(tqdm(files, total=len(files), ncols=100, unit="file", desc="Loading Airfoils")):
+        success = False
+        curvefit_kwargs = {
+            "n_control_points": 20,
+        }
+        while not success:
+            try:
+                airfoil = BezierAirfoil.from_file(
+                    os.path.join(original_dir, file),
+                    curvefit_kwargs=curvefit_kwargs
+                )
+                filename = os.path.join(output_dir, f"{airfoil.name}.dat")
+                np.savetxt(filename, airfoil.points, fmt="%.6f", header=airfoil.description, comments="")
+                success = True
+
+            except Exception:
+                print(f"\nFailed to fit {file} with n={curvefit_kwargs['n_control_points']}, trying with n={curvefit_kwargs['n_control_points'] - 1}")
+                if curvefit_kwargs["n_control_points"] < 6:
+                    print(f"\nFailed to fit {file} with n={curvefit_kwargs['n_control_points']}, giving up.")
+                    break
+                curvefit_kwargs = {
+                    "n_control_points": curvefit_kwargs["n_control_points"] - 1,
+                }
