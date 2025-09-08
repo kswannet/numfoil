@@ -59,7 +59,7 @@ class AirfoilDataFile:
         """Returns file header.
 
         Returns:
-            str | None: The header lines as a single multi‐line string.
+            str | None: The header lines as a single multi-line string.
         """
         if self.num_header_lines == 0:
             return None
@@ -204,9 +204,20 @@ class AirfoilNormalizer:
     @staticmethod
     def _remove_consecutive_duplicates(points: np.ndarray) -> np.ndarray:
         """Removes consecutive duplicate points from the array."""
-        diff = np.diff(points, axis=0)
-        idx = np.where(np.any(diff != 0, axis=1))[0] + 1
-        return np.vstack([points[0], points[idx]])
+        # # this one checks for exact duplicates
+        # diff = np.diff(points, axis=0)
+        # idx = np.where(np.any(diff != 0, axis=1))[0] + 1
+        # # this one checks for duplicates in x, regardless of y
+        # x_diff = np.diff(points[:, 0])
+        # idx = np.where(x_diff != 0)[0] + 1
+        # return np.vstack([points[0], points[idx]])
+        # # new version that should also fix manually closed trailing edges
+        x, y = points[:, 0], points[:, 1]
+        mask = np.ones(len(points), dtype=bool)
+        for i in np.where(np.isclose(np.diff(x), 0))[0]:
+            mask[i + (abs(y[i + 1]) < abs(y[i]))] = False
+        return points[mask]
+
 
     @staticmethod
     def _remove_overshoots(points: np.ndarray) -> np.ndarray:

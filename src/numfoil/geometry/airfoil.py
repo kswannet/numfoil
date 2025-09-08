@@ -174,11 +174,12 @@ class AirfoilBase(ABC):
         # else:
         #     raise RuntimeError("Failed to find maximum camber.")
         result = opt.minimize(
-            lambda u: -self.camber_line.evaluate_at(u)[0][1], 0.5, bounds=[(0, 1)]
+            lambda u: -abs(self.camber_line.evaluate_at(u)[0][1]), 0.5, bounds=[(0, 1)]
         )
         if not result.success:
             print(result)
-            raise RuntimeError("Failed to find upper crest.")
+            # raise RuntimeError("Failed to find max camber.")
+            warning("Failed to find max camber.")
         return self.camber_line.evaluate_at(result.x[0])
 
     @cached_property
@@ -313,8 +314,8 @@ class BsplineAirfoil(AirfoilBase):
     def __init__(
         self,
         surface_curve: ParametricCurve,
-        name: str = None,
-        description: str = None,
+        name: str = "",
+        description: str = "",
     ):
         # save the surface spline object
         self.surface_curve = surface_curve
@@ -336,8 +337,8 @@ class BsplineAirfoil(AirfoilBase):
     def from_coordinate_array(
         cls,
         points: np.ndarray,
-        name: str = None,
-        description: str = None,
+        name: str = "",
+        description: str = "",
         normalize: bool = True,
     ):
         """Creates an Airfoil object from an array of points.
@@ -417,8 +418,8 @@ class BsplineAirfoil(AirfoilBase):
         cls,
         thickness_curve: ParametricCurve | np.ndarray,
         camber_curve: ParametricCurve | np.ndarray,
-        name: str = None,
-        description: str = None
+        name: str = "",
+        description: str = ""
     ) -> "BsplineAirfoil":
         """
         Construct airfoil from camber and thickness distributions.
@@ -562,8 +563,8 @@ class BezierAirfoil(AirfoilBase):
     def __init__(
         self,
         surface_curve: ParametricCurve,
-        name: str = None,
-        description: str = None,
+        name: str = "",
+        description: str = "",
     ):
         # save the surface spline object
         self.surface_curve = surface_curve
@@ -580,8 +581,8 @@ class BezierAirfoil(AirfoilBase):
     def from_control_points(
         cls,
         control_points: np.ndarray,
-        name: str = None,
-        description: str = None,
+        name: str = "",
+        description: str = "",
         # normalize: bool = True,
         **kwargs
     ):
@@ -611,8 +612,8 @@ class BezierAirfoil(AirfoilBase):
     def from_coordinate_array(
         cls,
         points: np.ndarray,
-        name: str = None,
-        description: str = None,
+        name: str = "",
+        description: str = "",
         normalize: bool = True,
         fit_method: str = "split_u_l",
         trailing_edge_thickness: float | None = None,
@@ -1032,8 +1033,8 @@ class BezierAirfoil(AirfoilBase):
         cls,
         thickness_curve: ParametricCurve | np.ndarray,
         camber_curve: ParametricCurve | np.ndarray,
-        name: str = None,
-        description: str = None,
+        name: str = "",
+        description: str = "",
         points: np.ndarray = None,
     ) -> "BezierAirfoil":
         """
@@ -1194,8 +1195,8 @@ class CSTAirfoil(AirfoilBase):
         cls,
         points: np.ndarray,
         normalize: bool = True,
-        name: str = None,
-        description: str = None,
+        name: str = "",
+        description: str = "",
     ):
         """Creates an Airfoil object from an array of points.
         Mainly used for input validation.
