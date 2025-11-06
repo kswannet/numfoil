@@ -10,7 +10,7 @@ from typing import Union, Tuple
 from abc import ABCMeta, abstractmethod, ABC
 from  warnings import warn as warning
 
-from .data import AirfoilDataFile, AirfoilNormalizer
+from ..data import AirfoilDataFile, AirfoilNormalizer
 from ..util import cosine_spacing, chebyshev_nodes, ensure_1d_vector, selig
 from .spline import *
 from .geom2d import Point2D
@@ -187,7 +187,7 @@ class AirfoilBase(ABC):
         """Calculates the area of the airfoil."""
         x = cosine_spacing(0, 1, num=1000)
         t = self.thickness_at(x)
-        return np.trapz(t, x)
+        return np.trapezoid(t, x)
         # return spi.simpson(t, x)
 
     @cached_property
@@ -378,7 +378,7 @@ class BsplineAirfoil(AirfoilBase):
         # )
 
         return cls(
-            AirfoilNormalizer.normalize(points) if normalize else BSpline2D(points),
+            AirfoilNormalizer.normalized_bspline(points) if normalize else BSpline2D(points),
             name=name,
             description=description,
             # data_points=new_points,
@@ -436,8 +436,9 @@ class BsplineAirfoil(AirfoilBase):
         if not isinstance(camber_curve, type(thickness_curve)):
             raise TypeError("Camber and thickness curves must be of the same type (curve object or array).")
 
+        # TODO if x values are already the same, no need for spline interpolation
         if isinstance(camber_curve, np.ndarray) and isinstance(thickness_curve, np.ndarray) \
-            and camber_curve[:,1] != thickness_curve[:,1]:
+            and (camber_curve[:,0] == thickness_curve[:,0]).all():
             camber_curve = BSpline2D(camber_curve)
             thickness_curve = BSpline2D(thickness_curve)
 
