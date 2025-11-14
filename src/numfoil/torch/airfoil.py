@@ -4,6 +4,14 @@ from typing import Optional, Tuple, Literal
 from .curve import TorchCSTCurve, KulfanModifiedCST
 from functools import cached_property
 
+import numpy as np
+
+from ..data import datafile, normalization
+
+# TODO : make airfoil class with dependcy injection of curve types, a truly
+# TODO |    generic airfoil class with CST, Bezier, etc curve support and
+# TODO |    universal fit method.
+
 class TorchKulfanAirfoil(nn.Module):
     """
     Batched Kulfan (CST) airfoil with comprehensive geometric analysis.
@@ -16,9 +24,8 @@ class TorchKulfanAirfoil(nn.Module):
 
     def __init__(
         self,
-        parameters: torch.Tensor,
-        n1: float = 0.5,
-        n2: float = 1.0,
+        upper_surface: KulfanModifiedCST,
+        lower_surface: KulfanModifiedCST,
         device: Optional[torch.device | str] = None,
     ):
         super().__init__()
@@ -26,75 +33,118 @@ class TorchKulfanAirfoil(nn.Module):
         self.device = torch.device(device) if device is not None else \
             torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        self.parameters = torch.as_tensor(parameters, dtype=torch.float32, device=self.device)
+        # Create base CST curves
+        self.register_buffer("upper_surface", upper_surface)
+        self.register_buffer("lower_surface", lower_surface)
 
-        if self.parameters.ndim == 1:
-            self.parameters = self.parameters.unsqueeze(0)
-        elif self.parameters.ndim != 2:
-            raise ValueError("parameters must be 1D or 2D")
+        self._validate_curves()
 
+    def _validate_curves(self):
+        # if self.upper_surface.n_coefficients != self.lower_surface.n_coefficients:
+        if self.upper_surface.parameters.shape != self.lower_surface.parameters.shape:
+            raise ValueError(
+                "Mismatched upper and lower surface parameter shapes: "
+                f"Upper and lower surfaces must have the same number of CST coefficients, "
+                f"got {self.upper_surface.parameters.shape} and {self.lower_surface.parameters.shape}, "
+            )
+        if self.upper_surface.leading_edge_weight.shape != self.lower_surface.leading_edge_weight.shape:
+            raise ValueError(
+                "Upper and lower surfaces must have the same leading edge weight shape, "
+                f"got {self.upper_surface.leading_edge_weight.shape} and "
+                f"{self.lower_surface.leading_edge_weight.shape}"
+            )
+        if self.upper_surface.trailing_edge_thickness.shape != self.lower_surface.trailing_edge_thickness.shape:
+            raise ValueError(
+                "Upper and lower surfaces must have the same trailing edge thickness shape, "
+                f"got {self.upper_surface.trailing_edge_thickness.shape} and "
+                f"{self.lower_surface.trailing_edge_thickness.shape}"
+            )
+        if self.upper_surface.batch_size != self.lower_surface.batch_size:
+            raise ValueError(
+                "Upper and lower surfaces must have the same batch size, "
+                f"got {self.upper_surface.batch_size} and {self.lower_surface.batch_size}"
+            )
+
+    @classmethod
+    def from_param_tensor(
+        cls,
+        parameters: torch.Tensor | np.ndarray,
+        n1: float = 0.5,
+        n2: float = 1.0,
+        device: Optional[torch.device | str] = None,
+    ) -> "TorchKulfanAirfoil":
+        """
+        Create airfoil from parameter tensor.
+
+        Args:
+            parameters (torch.Tensor | np.ndarray, shape [batch, 2*n_coeffs + 2]):
+                tensor of upper and lower CST coefficients concatenated
+                with leading edge weight and trailing edge thickness.
+            n1 (float): CST exponent n1, default 0.5
+            n2 (float): CST exponent n2, default 1.0
+            device (Optional[torch.device | str]): Torch device
+        """
+        if parameters.ndim > 2:
+            raise ValueError(
+                f"Parameters tensor must be 2D (batch, n_params), got shape {parameters.shape}"
+            )
         n_params = parameters.shape[1]
         if n_params < 4:
-            raise ValueError(f"Need at least 4 parameters, got {n_params}")
-
-        n_cst_params = n_params - 2
-        if n_cst_params % 2 != 0:
-            raise ValueError(f"Number of CST parameters must be even (got {n_cst_params})")
-
-        self.n_coeffs_per_surface = n_cst_params // 2
-        self.batch_size = self.parameters.shape[0]
-        self.n1 = n1
-        self.n2 = n2
-
-        # Extract parameters
-        # upper_coeffs = parameters[:, :self.n_coeffs_per_surface]
-        lower_coeffs = self.parameters[:, self.n_coeffs_per_surface:-2]
-        le_weight = self.parameters[:, -2]
-        te_thickness = self.parameters[:, -1]
-
-        # Create base CST curves
-        # base_upper = TorchCSTCurve(upper_coeffs, n1=n1, n2=n2, device=self.device)
-        # base_lower = TorchCSTCurve(lower_coeffs, n1=n1, n2=n2, device=self.device)
-
-        # Wrap in modification layers
-        # self.upper = KulfanModifiedCST(base_upper, le_weight, te_thickness, "upper")
-        # self.lower = KulfanModifiedCST(base_lower, le_weight, te_thickness, "lower")
-
-    @cached_property
-    def upper_surface(self) -> TorchCSTCurve:
-        """Base (unmodified) upper surface curve."""
-        baseCSTcurve = TorchCSTCurve(
-            self.parameters[:, : self.n_coeffs_per_surface],
-            n1=self.n1,
-            n2=self.n2,
-            device=self.device,
-        )
-        return KulfanModifiedCST(
-            baseCSTcurve,
-            leading_edge_weight=self.parameters[:, -2],
-            trailing_edge_thickness=self.parameters[:, -1],
-            surface_type="upper"
+            raise ValueError(
+                f"Need at least 4 parameters (1 upper, 1 lower, w_le, t_te), got {n_params}"
+            )
+        if n_params % 2 != 0:
+            raise ValueError(
+                f"Number of CST parameters must be even (2*n_coeffs + 2), got {n_params}"
+            )
+        n_coeffs = (n_params - 2) // 2
+        return cls.from_kulfan_params(
+            upper_coeffs=parameters[..., :n_coeffs],
+            lower_coeffs=parameters[..., n_coeffs:-2],
+            w_le=parameters[..., -2],
+            t_te=parameters[..., -1],
+            n1=n1,
+            n2=n2,
+            device=device,
         )
 
-    @cached_property
-    def lower_surface(self) -> TorchCSTCurve:
-        """Base (unmodified) lower surface curve."""
-        baseCSTcurve = TorchCSTCurve(
-            self.parameters[:, self.n_coeffs_per_surface:-2],
-            n1=self.n1,
-            n2=self.n2,
-            device=self.device,
-        )
-        return KulfanModifiedCST(
-            baseCSTcurve,
-            leading_edge_weight=self.parameters[:, -2],
-            trailing_edge_thickness=self.parameters[:, -1],
-            surface_type="lower"
+    @classmethod
+    def from_kulfan_params(
+        cls,
+        upper_coeffs: torch.Tensor | np.ndarray,
+        lower_coeffs: torch.Tensor | np.ndarray,
+        w_le: torch.Tensor | np.ndarray,
+        t_te: torch.Tensor | np.ndarray,
+        n1: float = 0.5,
+        n2: float = 1.0,
+        device: Optional[torch.device | str] = None,
+        ) -> "TorchKulfanAirfoil":
+        return cls(
+            KulfanModifiedCST(
+                upper_coeffs,
+                leading_edge_weight=w_le,
+                trailing_edge_thickness=t_te,
+                n1=n1,
+                n2=n2,
+                device=device,
+            ),
+            KulfanModifiedCST(
+                lower_coeffs,
+                leading_edge_weight=w_le,
+                trailing_edge_thickness=t_te,
+                n1=n1,
+                n2=n2,
+                device=device,
+            ),
         )
 
     @property
     def is_batched(self) -> bool:
         return self.batch_size > 1
+
+    @property
+    def batch_size(self) -> int:
+        return self.upper_surface.batch_size
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """

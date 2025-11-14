@@ -5,6 +5,7 @@ import torch.nn as nn
 from torch.func import vmap
 
 from typing import Union, Tuple, Optional, Literal
+from functools import cached_property
 
 
 class TorchCSTCurve(nn.Module):
@@ -97,8 +98,8 @@ class TorchCSTCurve(nn.Module):
             raise ValueError("coefficients must be 1D or 2D")
 
         # Register coefficients as a parameter so they can be optimized
-        self.register_parameter(
-            "coefficients", nn.Parameter(coefficients)  # [B, K]
+        self.register_buffer(
+            "coefficients", coefficients  # [B, K]
         )
 
         # Class function exponents
@@ -573,7 +574,7 @@ class TorchCSTCurve(nn.Module):
             return (
                 self.class_first_derivative(x) * self.shape_function(x)
                 + self.class_function(x) * self.shape_first_derivative(x)
-            ).squeeze(0)
+            ).squeeze()
 
         if mode == "autograd":
             x = (
@@ -632,11 +633,30 @@ class TorchCSTCurve(nn.Module):
             )
 
         if mode == "autograd":
-            x = x.clamp_min(self.eps)
-            grad_first = self.first_derivative_at(x, mode="autograd")
-            return torch.autograd.grad(
-                grad_first, x, torch.ones_like(grad_first), create_graph=True
-            )[0]
+            x = (
+                self._prepare_input(x)
+                .clamp_min(self.eps)
+                .detach()
+                .clone()
+                .requires_grad_(True)
+            )
+            def grad_fn(x):
+                y = self.forward(x)
+                dy = torch.autograd.grad(
+                    y, x, torch.ones_like(y), create_graph=True
+                )[0]
+                ddy = torch.autograd.grad(
+                    dy, x, torch.ones_like(dy), create_graph=True
+                )[0]
+                return ddy
+
+            if self.batch_size == 1:
+                return grad_fn(x)  # [X]
+            else:
+                # map the grad_fn over the batch dimension
+                return vmap(grad_fn)(
+                    x.unsqueeze(0).expand(self.batch_size, -1)
+                )  # [B, X]
 
         raise ValueError("mode must be 'analytic' or 'autograd'.")
 
@@ -704,7 +724,21 @@ class TorchCSTCurve(nn.Module):
         """
         dy_dx = self.first_derivative_at(x, mode=mode)
         d2y_dx2 = self.second_derivative_at(x, mode=mode)
-        return d2y_dx2 / torch.pow(1.0 + dy_dx**2, 1.5)
+        return (d2y_dx2 / torch.pow(1.0 + dy_dx**2, 1.5)).squeeze()
+
+    def radius_at(self, x: torch.Tensor, mode: str = "analytic") -> torch.Tensor:
+        """
+        Compute radius of curvature :math:`R(x) = 1 / \kappa(x)`.
+
+        Args:
+            x: Chordwise locations in :math:`[0, 1]`.
+            mode: Derivative mode (``"analytic"`` or ``"autograd"``).
+
+        Returns:
+            torch.Tensor: Radius of curvature values.
+        """
+        curvature = self.curvature_at(x, mode=mode)
+        return (1.0 / curvature).squeeze()
 
     @classmethod
     def from_numpy(cls, coefficients: np.ndarray, n1: float = 0.5, n2: float = 1.0, device: str = "cpu") -> "TorchCSTCurve":
@@ -721,7 +755,7 @@ class TorchCSTCurve(nn.Module):
         """
         return cls(torch.tensor(coefficients, dtype=torch.float32), n1, n2, device=device)
 
-    def plot(self, n_points: int = 1000, spacing: str = "cosine", ax=None, fig=None, **plot_kwargs):
+    def plot(self, idx: int = None, n_points: int = 1000, spacing: str = "cosine", ax=None, fig=None, **plot_kwargs):
         """
         Plot the CST curve using Matplotlib.
 
@@ -748,6 +782,8 @@ class TorchCSTCurve(nn.Module):
 
         if self.batch_size == 1:
             ax.plot(x.cpu().numpy(), y, **plot_kwargs)
+        elif idx is not None:
+            ax.plot(x.cpu().numpy(), y[idx], label=f"Curve {idx+1}/{self.batch_size}", **plot_kwargs)
         else:
             for i in range(self.batch_size):
                 ax.plot(x.cpu().numpy(), y[i], label=f"Curve {i+1}", **plot_kwargs)
@@ -868,12 +904,16 @@ class TorchCSTCurve(nn.Module):
 
         return cls(coeffs.squeeze(0), n1=n1, n2=n2, device=device)
 
+
 class KulfanModifiedCST(TorchCSTCurve):
-    """
-    CST curve specialized with Kulfan leading- and trailing-edge modifications.
+    """Airfoil specific CST curve with Kulfan leading- and trailing-edge
+    modifications.
+
+    Does not use dependency injection to keep the interface simpler.
+    Probably should have it take a base CST curve instance instead of creating
+    it but I don't wan't to instantiate two objects every time.
 
     The modified ordinate reads:
-
         y_mod(x) = y_base(x)
                    + w_le * x * (1 - x)^{n + 0.5}
                    + s_te * t_te * x / 2
@@ -887,13 +927,29 @@ class KulfanModifiedCST(TorchCSTCurve):
 
     The class fully supports batching, automatic differentiation, and analytic
     derivatives by extending the TorchCSTCurve base implementation.
+
+    Attributes:
+        leading_edge_weight (torch.Tensor):
+            Kulfan leading-edge weight ``w_le`` of shape [B].
+
+        trailing_edge_thickness (torch.Tensor):
+            Kulfan trailing-edge thickness ``t_te`` of shape [B].
+
+        surface_type (str):
+            Either ``"upper"`` or ``"lower"``, determined from leading-edge
+            slope.
+
+        te_sign (float):
+            Sign of the TE offset, +1.0 for upper surface, -1.0 for lower
+            surface.
     """
 
     def __init__(
         self,
         coefficients: Union[torch.Tensor, np.ndarray],
-        leading_edge_weight: Union[torch.Tensor, float],
-        trailing_edge_thickness: Union[torch.Tensor, float],
+        leading_edge_weight: Union[torch.Tensor, float] = 0.0,
+        trailing_edge_thickness: Union[torch.Tensor, float] = 0.0,
+        surface_type: Optional[str] = None,
         n1: float = 0.5,
         n2: float = 1.0,
         device: Optional[torch.device | str] = None,
@@ -902,100 +958,186 @@ class KulfanModifiedCST(TorchCSTCurve):
         Initialize a Kulfan-modified CST curve.
 
         Args:
-            coefficients: CST coefficients ``a_k`` of shape [K] or [B, K].
-            leading_edge_weight: Kulfan LE weight ``w_le`` (scalar or [B]).
-            trailing_edge_thickness: Kulfan TE thickness ``t_te`` (scalar or [B]).
-            surface: Either ``"upper"`` (positive TE thickness) or ``"lower"`` (negative).
-            n1: Leading-edge class exponent.
-            n2: Trailing-edge class exponent.
-            device: Optional device for all tensors.
+            coefficients (torch.Tensor | np.ndarray):
+                CST coefficients ``a_k`` of shape [K] or [B, K].
+
+            leading_edge_weight (torch.Tensor | float):
+                Kulfan LE weight ``w_le`` (scalar or [B]).
+                Default is 0.0, meaning no LE modification.
+
+            trailing_edge_thickness (torch.Tensor | float):
+                Kulfan TE thickness ``t_te`` (scalar or [B]).
+                Default is 0.0, meaning no TE modification.
+
+            surface (str):
+                Either ``"upper"`` (positive TE thickness) or ``"lower"`` (negative).
+                Default is None, and type is inferred from leading-edge slope.
+
+            n1 (float):
+                Leading-edge class exponent.
+                Default is 0.5 for conventional airfoils.
+
+            n2 (float):
+                Trailing-edge class exponent.
+                Default is 1.0 for conventional airfoils.
+
+            device (Optional[torch.device | str]):
+                Optional device for all tensors.
+                Default is CUDA if available.
 
         Raises:
             ValueError: If surface is not "upper" or "lower", or parameters fail to broadcast.
         """
         super().__init__(coefficients, n1=n1, n2=n2, device=device)
 
-        if super().tangent_at(0.0)[0,1] < 0:
-            self.surface = "lower"
-        elif super().tangent_at(0.0)[0,1] > 0:
-            self.surface = "upper"
+        # Determine surface type
+        self.surface_type = surface_type or self.infer_surface_type()
 
+        # little validation
+        if self.surface_type not in ("upper", "lower"):
+            raise ValueError("surface_type must be 'upper' or 'lower'.")
+        if not torch.all(trailing_edge_thickness >= 0):
+            raise ValueError(
+                "Trailing edge thickness must be non-negative."
+            )
 
         # Prepare LE/TE parameters so they broadcast across batch size B
-        le = self._prepare_batch_parameter(leading_edge_weight, "leading_edge_weight")
-        te = self._prepare_batch_parameter(trailing_edge_thickness, "trailing_edge_thickness")
+        # Register as buffers (non-trainable but part of state_dict)
+        self.register_buffer(
+            "leading_edge_weight",      # [B]
+            self._prepare_modifier_parameter(leading_edge_weight),
+        )
+        self.register_buffer(
+            "trailing_edge_thickness",  # [B]
+            self._prepare_modifier_parameter(trailing_edge_thickness),
+        )
 
-        # Register as trainable parameters so that optimizers can adjust them
-        self.register_parameter("leading_edge_weight", nn.Parameter(le))
-        self.register_parameter("trailing_edge_thickness", nn.Parameter(te))
-
-    # --------------------------------------------------------------------- #
-    # Helper utilities
-    # --------------------------------------------------------------------- #
-    def _prepare_batch_parameter(
+    def _prepare_modifier_parameter(
         self,
-        value: Union[torch.Tensor, float],
-        name: str,
+        x: Union[torch.Tensor, float],
     ) -> torch.Tensor:
         """
-        Broadcast scalar or 1D tensor ``value`` to match batch size ``B``.
+        Broadcast scalar or 1D tensor to match batch size [B, 1].
+        Unsqueezed last dimension for broadcasting in computations later.
 
         Args:
             value: Scalar or tensor to broadcast.
             name: Parameter name used in error messages.
 
         Returns:
-            Tensor of shape [B] aligned with ``self.coefficients``.
+            torch.Tensor: Shape [B, 1].
 
         Raises:
             ValueError: If broadcasting to [B] is impossible.
         """
-        tensor = torch.as_tensor(
-            value,
+        x = torch.as_tensor(
+            x,
             dtype=self.coefficients.dtype,
             device=self.device,
         )
 
-        if tensor.ndim == 0:
-            tensor = tensor.expand(self.batch_size)
-        elif tensor.ndim == 1:
-            if tensor.shape[0] == 1 and self.batch_size > 1:
-                tensor = tensor.expand(self.batch_size)
-            elif tensor.shape[0] != self.batch_size:
-                raise ValueError(
-                    f"{name} must broadcast to batch size {self.batch_size}, "
-                    f"got shape {tuple(tensor.shape)}."
-                )
+        # single value: expand to batch size
+        if x.ndim == 0 or (x.ndim == 1 and x.shape[0] == 1):
+            x = x.expand(self.batch_size)       # [B]
+        # 1D tensor: validate shape
+        if x.shape[0] != self.batch_size:
+            raise ValueError(
+                f"Dimension mismatch: batch size is {self.batch_size}, "
+                f"but LE or TE modifier has shape {tuple(x.shape)} instead."
+            )
+        return x.unsqueeze(-1)
+
+    def infer_surface_type(self) -> str:
+        """Determine if the curve represents an upper or lower airfoil surface.
+
+        Based on the sign of the leading-edge slope at x=0:
+            - Positive slope indicates upper surface.
+            - Negative slope indicates lower surface.
+
+        Slope is the first derivative of the *unmodified* CST curve,
+        and signs are cross-checked with the first coefficient and y-component
+        of the tangent vector.
+
+        Returns:
+            str: "upper" if TE thickness is positive, "lower" if negative.
+
+        Raises:
+            ValueError: If mixed surface types are detected in batch.
+        """
+        if torch.all(torch.sign(self.coefficients[..., 0]) > 0):
+            return "upper"
+        elif torch.all(torch.sign(self.coefficients[..., 0]) < 0):
+            return "lower"
         else:
             raise ValueError(
-                f"{name} must be scalar or 1D tensor; received ndim={tensor.ndim}."
+                "Inconsistent signs of leading-edge slope and first coefficient. "
+                "Potentially mixed upper/lower surfaces in batch."
             )
 
-        return tensor.clone()
+    @property
+    def parameters(self) -> torch.Tensor:
+        """Get Kulfan modification parameters as a single tensor.
+
+        Returns:
+            torch.Tensor: Shape [B, 2] with columns [w_le, t_te].
+        """
+        return torch.cat(
+            [
+                self.coefficients,
+                self.leading_edge_weight,
+                self.trailing_edge_thickness,
+            ],
+            dim=-1,
+        )  # [B>1, n_coefficients + 2]
 
     @property
     def te_sign(self) -> float:
-        """
-        Sign applied to trailing-edge thickness depending on surface.
+        """Sign applied to trailing-edge thickness depending on surface.
+        Unsqueezed last dimension for broadcasting during computations later.
 
         Returns:
-            +1.0 for upper surface, -1.0 for lower surface.
+            torch.Tensor: Shape [B, 1]
+                Values +1.0 for upper surface, -1.0 for lower surface.
         """
-        return 1.0 if self.surface == "upper" else -1.0
+        return torch.sign(self.coefficients[:, 0]).unsqueeze(-1)  # [B, 1]
 
-    @property
-    def leading_edge_exponent(self) -> float:
+    def leading_edge_mod(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Exponent used in the Kulfan LE term: ``(1 - x)^{n + 0.5}``.
+        Compute the Kulfan leading-edge modification term.
+
+        :math:`\delta_{LE}(x) = w_{le} \cdot x \cdot (1 - x)^{n + 0.5}`
+
+        Args:
+            x: Chordwise locations [X].
 
         Returns:
-            float: ``n + 0.5`` where n is the Bernstein degree.
-        """
-        return float(self.degree) + 0.5
+            LE modification [B, X].
 
-    # --------------------------------------------------------------------- #
-    # Core evaluation
-    # --------------------------------------------------------------------- #
+        Notes:
+            Could exand x to [B, X] with
+            .unsqueeze(0).expand(self.batch_size, -1), but works fine as is, as
+            long as leading edge weight is unsqueezed to [B, 1].
+        """
+        x = self._prepare_input(x)                      # [X]
+        one_minus_x = (1.0 - x).clamp_min(self.eps)     # [X]
+        w_le = self.leading_edge_weight                 # [B, 1]
+        return (
+            w_le * x * torch.pow(one_minus_x, self.degree + 0.5)
+        ).squeeze()                                     # [X] or [B, X]
+
+    def trailing_edge_mod(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute the Kulfan trailing-edge modification term.
+
+        Args:
+            x: Chordwise locations [X].
+
+        Returns:
+            torch.Tensor: TE modification, shape [B, X].
+        """
+        x = self._prepare_input(x)                          # [X]
+        t_te = self.trailing_edge_thickness                 # [B, 1]
+        return  (self.te_sign * t_te * x / 2.0).squeeze()   # [X] or [B, X]
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Evaluate the Kulfan modified curve at chordwise locations ``x``.
@@ -1013,46 +1155,108 @@ class KulfanModifiedCST(TorchCSTCurve):
         Returns:
             torch.Tensor: Modified ordinates with shape [X] or [B, X].
         """
-        x = self._prepare_input(x)  # [X]
-        base_y = super().forward(x)  # [X] or [B, X]
+        x = self._prepare_input(x)          # [X]
+        return (
+            super().forward(x)              # [X] or [B, X]
+            + self.leading_edge_mod(x)      # [X] or [B, X]
+            + self.trailing_edge_mod(x)     # [X] or [B, X]
+        )
 
-        if base_y.ndim == 1:
-            base_y = base_y.unsqueeze(0)  # [1, X] → [B, X] with B=1
-
-        modified = self._apply_modifications(x, base_y)  # [B, X]
-        return modified.squeeze(0) if self.batch_size == 1 else modified
-
-    def _apply_modifications(self, x: torch.Tensor, base_y: torch.Tensor) -> torch.Tensor:
+    def leading_edge_mod_first_derivative(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Apply LE and TE modifications to base ordinates.
+        Compute first derivative of the Kulfan leading-edge modification term.
+
+        :math:`\delta_{LE}'(x) = w_le * [ (1 - x)^{n+0.5} - (n+0.5) x (1 - x)^{n-0.5} ]`
 
         Args:
-            x: Evaluation points [X].
-            base_y: Base CST ordinates [B, X].
+            x: Chordwise locations [X].
 
         Returns:
-            torch.Tensor: Modified ordinates [B, X].
+            torch.Tensor: \delta_{LE}'(x), shape [B, X].
         """
-        x_batch = x.unsqueeze(0).expand(self.batch_size, -1)  # [B, X]
-        one_minus_x = (1.0 - x_batch).clamp_min(self.eps)      # [B, X]
+        x = self._prepare_input(x)                      # [X]
+        one_minus_x = (1.0 - x).clamp_min(self.eps)     # [X]
+        w_le = self.leading_edge_weight                 # [B, 1]
+        exponent = self.degree + 0.5                    # scalar
+        return w_le * (
+            torch.pow(one_minus_x, exponent)
+            - exponent * x * torch.pow(one_minus_x, exponent - 1.0)
+        ).squeeze()                                     # [B, X] or [X]
 
-        le_term = (
-            self.leading_edge_weight.unsqueeze(-1)             # [B, 1]
-            * x_batch                                          # [B, X]
-            * torch.pow(one_minus_x, self.leading_edge_exponent)  # [B, X]
+    def leading_edge_mod_second_derivative(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Compute the second derivative of the Kulfan leading-edge modification.
+
+        ..math::
+            \delta_{LE}''(x) = w_{le} \left[
+            -2 (n + 0.5) (1 - x)^{n-0.5}
+            + (n + 0.5)(n - 0.5) x (1 - x)^{n-1.5}
+            \right]
+
+        Dimension flow mirrors the first derivative:
+            result is [B, X] (squeezed to [X] if B=1).
+        """
+        x = self._prepare_input(x)                      # [X]
+        one_minus_x = (1.0 - x).clamp_min(self.eps)     # [X]
+        w_le = self.leading_edge_weight                 # [B, 1]
+        exponent = self.degree + 0.5                    # scalar
+        return w_le * (
+            -2.0 * exponent * torch.pow(one_minus_x, exponent - 1.0)
+            + exponent * (exponent - 1.0) * x * torch.pow(one_minus_x, exponent - 2.0)
+        ).squeeze()                                     # [B, X] or [X]
+
+    def trailing_edge_mod_first_derivative(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Compute the first derivative of the Kulfan trailing-edge modification.
+        This is a constant value.
+
+        :math:`\delta_{TE}'(x) = s_{te} \cdot t_{te} / 2`
+
+        Args:
+            x (torch.Tensor): Chordwise locations [X].
+
+        Returns:
+            torch.Tensor: \delta_{TE}'(x), shape [B, X].
+
+        Dimension flow:
+            - constant: [B, 1]
+            - ones_like(x): [X]
+            - Broadcasting yields [B, X] (squeezed to [X] if B=1).
+        """
+        x = self._prepare_input(x)              # [X]
+        t_te = self.trailing_edge_thickness     # [B, 1]
+        return (
+            self.te_sign * t_te / 2.0 * torch.ones_like(x)
+        ).squeeze()                             # [B, X] or [X]
+
+    def trailing_edge_mod_second_derivative(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Compute the second derivative of the Kulfan trailing-edge modification.
+
+        :math:`\delta_{TE}''(x) = 0`
+
+        Args:
+            x (torch.Tensor): Chordwise locations [X].
+
+        Returns:
+            torch.Tensor: \delta_{TE}''(x), shape [B, X].
+
+        Returns a zero tensor with shape [B, X] (squeezed to [X] if B=1).
+        """
+        x = self._prepare_input(x)  # [X]
+        zeros = torch.zeros(        # [B, X]
+            (self.batch_size, x.shape[0]),
+            dtype=self.coefficients.dtype,
+            device=self.device,
         )
+        return zeros.squeeze()      # [B, X] or [X]
 
-        te_term = (
-            self.te_sign
-            * self.trailing_edge_thickness.unsqueeze(-1)       # [B, 1]
-            * x_batch / 2.0                                    # [B, X]
-        )
+    # Aliases
+    dLE_mod = leading_edge_mod_first_derivative
+    d2LE_mod = leading_edge_mod_second_derivative
+    dTE_mod = trailing_edge_mod_first_derivative
+    d2TE_mod = trailing_edge_mod_second_derivative
 
-        return base_y + le_term + te_term
-
-    # --------------------------------------------------------------------- #
-    # Derivatives
-    # --------------------------------------------------------------------- #
     def first_derivative_at(
         self,
         x: torch.Tensor,
@@ -1061,11 +1265,10 @@ class KulfanModifiedCST(TorchCSTCurve):
         """
         Compute first derivative of the modified curve.
 
-        The derivative is:
-
-            dy_mod/dx = dy_base/dx
-                        + w_le * [ (1 - x)^{n+0.5} - (n+0.5) x (1 - x)^{n-0.5} ]
-                        + s_te * t_te / 2
+        ..math::
+            dy_mod/dx = dy_base/dx + dLE_mod/dx + dTE_mod/dx
+            dLE_mod/dx = w_le * [ (1 - x)^{n+0.5} - (n+0.5) x (1 - x)^{n-0.5} ]
+            dTE_mod/dx = s_te * t_te / 2
 
         Args:
             x: Evaluation points [X].
@@ -1077,6 +1280,16 @@ class KulfanModifiedCST(TorchCSTCurve):
         Raises:
             ValueError: When mode is invalid.
         """
+        if mode == "analytic":
+            x = self._prepare_input(x)  # [X]
+            # dy = super().first_derivative_at(x, mode="analytic")
+            # return dy + self.dLE_mod(x) + self.dTE_mod(x)
+            return (
+                super().first_derivative_at(x)
+                + self.leading_edge_mod_first_derivative(x)
+                + self.trailing_edge_mod_first_derivative(x)
+            ).squeeze()
+
         if mode == "autograd":
             x = (
                 self._prepare_input(x)
@@ -1086,10 +1299,10 @@ class KulfanModifiedCST(TorchCSTCurve):
                 .requires_grad_(True)
             )
 
-            def grad_fn(x_local: torch.Tensor) -> torch.Tensor:
-                y = self.forward(x_local)  # [X] or [B, X]
+            def grad_fn(x: torch.Tensor) -> torch.Tensor:
+                y = self.forward(x)  # [X] or [B, X]
                 return torch.autograd.grad(
-                    y, x_local, torch.ones_like(y), create_graph=True
+                    y, x, torch.ones_like(y), create_graph=True
                 )[0]
 
             if self.batch_size == 1:
@@ -1097,29 +1310,7 @@ class KulfanModifiedCST(TorchCSTCurve):
 
             return vmap(grad_fn)(x.unsqueeze(0).expand(self.batch_size, -1))
 
-        if mode != "analytic":
-            raise ValueError("mode must be 'analytic' or 'autograd'.")
-
-        x = self._prepare_input(x)  # [X]
-        base = super().first_derivative_at(x, mode="analytic")
-        if base.ndim == 1:
-            base = base.unsqueeze(0)  # [B, X]
-
-        x_batch = x.unsqueeze(0).expand(self.batch_size, -1)        # [B, X]
-        one_minus_x = (1.0 - x_batch).clamp_min(self.eps)           # [B, X]
-        exponent = self.leading_edge_exponent
-
-        le_deriv = self.leading_edge_weight.unsqueeze(-1) * (
-            torch.pow(one_minus_x, exponent)
-            - exponent * x_batch * torch.pow(one_minus_x, exponent - 1.0)
-        )  # [B, X]
-
-        te_deriv = (
-            self.te_sign * self.trailing_edge_thickness.unsqueeze(-1) / 2.0
-        ).expand_as(base)  # [B, X]
-
-        out = base + le_deriv + te_deriv
-        return out.squeeze(0) if self.batch_size == 1 else out
+        raise ValueError("mode must be 'analytic' or 'autograd'.")
 
     def second_derivative_at(
         self,
@@ -1129,15 +1320,11 @@ class KulfanModifiedCST(TorchCSTCurve):
         """
         Compute second derivative of the modified curve.
 
-        The analytic second derivative reads:
-
-            d²y_mod/dx² = d²y_base/dx²
-                           + w_le * [
-                                 -2 (n+0.5) (1 - x)^{n-0.5}
-                                 + (n+0.5)(n-0.5) x (1 - x)^{n-1.5}
-                             ]
-
-        (TE term contributes zero second derivative.)
+        ..math::
+            d2y_mod/dx2 = d2y_base/dx2 + d2LE_mod/dx2 + d2TE_mod/dx2
+            d2LE_mod/dx2 = w_le [ -2 (n + 0.5) (1 - x)^{n-0.5}
+                                + (n + 0.5)(n - 0.5) x (1 - x)^{n-1.5} ]
+            d2TE_mod/dx2 = 0
 
         Args:
             x: Evaluation points [X].
@@ -1149,44 +1336,45 @@ class KulfanModifiedCST(TorchCSTCurve):
         Raises:
             ValueError: When mode is invalid.
         """
-        if mode == "autograd":
-            x = self._prepare_input(x).clamp_min(self.eps).detach().clone().requires_grad_(True)
-            first = self.first_derivative_at(x, mode="autograd")
+        if mode == "analytic":
+            x = self._prepare_input(x)  # [X]
+            return (
+                super().second_derivative_at(x)
+                + self.leading_edge_mod_second_derivative(x)
+                # + self.trailing_edge_mod_second_derivative(x)  # zero anyway
+            ).squeeze()
 
-            def grad_fn(x_local: torch.Tensor) -> torch.Tensor:
-                dy = self.first_derivative_at(x_local, mode="autograd")
-                return torch.autograd.grad(dy, x_local, torch.ones_like(dy), create_graph=True)[0]
+        if mode == "autograd":
+            x = (
+                self._prepare_input(x)
+                .clamp_min(self.eps)
+                .detach()
+                .clone()
+                .requires_grad_(True)
+            )
+
+            def grad_fn(x: torch.Tensor) -> torch.Tensor:
+                y = self.forward(x)
+                dy = torch.autograd.grad(
+                    y, x, torch.ones_like(y), create_graph=True
+                )[0]
+                ddy = torch.autograd.grad(
+                    dy, x, torch.ones_like(dy), create_graph=True
+                )[0]
+                return ddy
 
             if self.batch_size == 1:
                 return grad_fn(x)
 
             return vmap(grad_fn)(x.unsqueeze(0).expand(self.batch_size, -1))
 
-        if mode != "analytic":
-            raise ValueError("mode must be 'analytic' or 'autograd'.")
-
-        x = self._prepare_input(x)  # [X]
-        base = super().second_derivative_at(x, mode="analytic")
-        if base.ndim == 1:
-            base = base.unsqueeze(0)  # [B, X]
-
-        x_batch = x.unsqueeze(0).expand(self.batch_size, -1)      # [B, X]
-        one_minus_x = (1.0 - x_batch).clamp_min(self.eps)         # [B, X]
-        exponent = self.leading_edge_exponent
-
-        le_second = self.leading_edge_weight.unsqueeze(-1) * (
-            -2.0 * exponent * torch.pow(one_minus_x, exponent - 1.0)
-            + exponent * (exponent - 1.0) * x_batch * torch.pow(one_minus_x, exponent - 2.0)
-        )  # [B, X]
-
-        out = base + le_second
-        return out.squeeze(0) if self.batch_size == 1 else out
+        raise ValueError("mode must be 'analytic' or 'autograd'.")
 
     def curvature_at(self, x: torch.Tensor, mode: str = "analytic") -> torch.Tensor:
         """
         Compute curvature of the modified curve:
 
-            κ(x) = y'' / (1 + (y')²)^{3/2}
+            κ(x) = y'' / (1 + (y')^{2})^{3/2}
 
         Args:
             x: Evaluation points [X].
@@ -1199,15 +1387,12 @@ class KulfanModifiedCST(TorchCSTCurve):
         d2y = self.second_derivative_at(x, mode=mode)
         return d2y / torch.pow(1.0 + dy**2, 1.5)
 
-    # --------------------------------------------------------------------- #
-    # Fitting routine
-    # --------------------------------------------------------------------- #
     @classmethod
     def fit(
         cls,
         points: torch.Tensor,
         n_coefficients: int,
-        surface: Literal["upper", "lower"] = "upper",
+        surface_type: Literal["upper", "lower"] = None,
         n1: float = 0.5,
         n2: float = 1.0,
         device: Optional[torch.device | str] = None,
@@ -1244,79 +1429,117 @@ class KulfanModifiedCST(TorchCSTCurve):
 
         points = torch.as_tensor(points, dtype=torch.float32, device=device)
 
+        # Validate input shape
         if points.ndim not in (2, 3) or points.shape[-1] != 2:
             raise ValueError(
                 "points must have shape [N, 2] or [B, N, 2]; "
                 f"received {tuple(points.shape)}."
             )
 
-        single_curve = points.ndim == 2
-        if single_curve:
-            points = points.unsqueeze(0)  # [1, N, 2]
+        # Add batch dimension for single curve
+        if points.ndim == 2:
+            points = points.unsqueeze(0)  # [B=1, N, 2]
 
+        # validate sufficient points
         B, N, _ = points.shape
-
         if N < n_coefficients:
             raise ValueError(
-                f"Expected at least {n_coefficients} samples; received N={N}."
+                f"Need at least {n_coefficients + 2} points to fit "
+            f"{n_coefficients} coefficients + 2 modifiers; received N={N}."
             )
 
         dtype = points.dtype
         x = points[..., 0]  # [B, N]
         y = points[..., 1]  # [B, N]
 
+        # validate x range
         if torch.any((x < 0) | (x > 1)):
             raise ValueError("x coordinates must lie within [0, 1].")
 
+        # clamp x values to avoid numerical issues at endpoints
         eps = torch.finfo(dtype).eps
         x = x.clamp(min=eps, max=1.0 - eps)  # Avoid singularities at endpoints
 
+        # Parameters needed for basis construction
         k = torch.arange(n_coefficients, device=device, dtype=dtype)  # [K]
-        n = n_coefficients - 1
+        n = n_coefficients - 1  # degree, scalar
+        x = x.unsqueeze(-1)     # [B, N, 1]
+        y = y.unsqueeze(-1)     # [B, N, 1]
 
-        x_col = x.unsqueeze(-1)  # [B, N, 1]
-        y_col = y.unsqueeze(-1)  # [B, N, 1]
-
+        # Binomial coefficients, log-space for numerical stability
         n_plus_1 = torch.full((n_coefficients,), n + 1.0, dtype=dtype, device=device)
         log_binom = (
             torch.lgamma(n_plus_1)
             - torch.lgamma(k + 1.0)
             - torch.lgamma(n_plus_1 - k)
-        )
+        )  # [K]
+        # Take exp() to leave log-space, and expand for broadcasting
         binom = torch.exp(log_binom).unsqueeze(0).unsqueeze(0)  # [1, 1, K]
 
-        class_term = torch.pow(x_col, n1) * torch.pow(1.0 - x_col, n2)    # [B, N, 1]
-        bernstein = torch.pow(x_col, k) * torch.pow(1.0 - x_col, n - k)   # [B, N, K]
-        design_base = class_term * bernstein * binom                      # [B, N, K]
+        Cx = torch.pow(x, n1) * torch.pow(1.0 - x, n2)    # [B, N, 1]
+        Bx = torch.pow(x, k) * torch.pow(1.0 - x, n - k)  # [B, N, K]
 
-        exponent = float(n) + 0.5
-        le_column = x_col * torch.pow(1.0 - x_col, exponent)  # [B, N, 1]
+        # Weighted Basis Matrix of the base CST curve
+        Mx = Cx * Bx * binom                              # [B, N, K]
 
-        te_sign = 1.0 if surface == "upper" else -1.0
-        te_column = te_sign * x_col / 2.0                     # [B, N, 1]
+        # Now the tensor of leading edge modifiers
+        le_mod = x * torch.pow(1.0 - x, n + 0.5)          # [B, N, 1]
 
-        design = torch.cat([design_base, le_column, te_column], dim=-1)  # [B, N, K+2]
+        # Tensor of trailing edge modifiers
+        # if surface_type == "upper":
+        #     te_sign = torch.ones(B, 1, dtype=dtype, device=device)     # [B, 1]
+        # elif surface_type == "lower":
+        #     te_sign = -torch.ones(B, 1, dtype=dtype, device=device)    # [B, 1]
+        # else:
+        #     te_sign = torch.sign(torch.diff(points[:, :2, 1], dim=1))  # [B, 1]
 
-        solution = torch.linalg.lstsq(design, y_col, rcond=rcond).solution.squeeze(-1)  # [B, K+2]
+        # [B, 1, 1] * [B, N, 1]
+        # te_mod = te_sign.unsqueeze(1) * x / 2.0                        # [B, N, 1]
 
-        coeffs = solution[..., :n_coefficients]      # [B, K]
-        le_weights = solution[..., -2]               # [B]
-        te_thickness = solution[..., -1]             # [B]
+        te_mod = x / 2.0  # [B, N, 1]
 
-        if single_curve:
-            coeffs = coeffs.squeeze(0)               # [K]
-            le_weights = le_weights.squeeze(0)       # []
-            te_thickness = te_thickness.squeeze(0)   # []
+        # Full Design matrix including LE and TE modifiers
+        Mx_mod = torch.cat([Mx, le_mod, te_mod], dim=-1)  # [B, N, K+2]
+
+        solution = torch.linalg.lstsq(Mx_mod, y, rcond=rcond).solution.squeeze(-1)  # [B, K+2]
+
+        # split solution and squeeze away empty batch dim if needed
+        coeffs = solution[..., :n_coefficients].squeeze()      # [B, K] or [K]
+        le_weights = solution[..., -2].squeeze()               # [B] or [1]
+        te_thickness = solution[..., -1].squeeze()             # [B] or [1]
+
+        # Validate surface type consistency
+        first_coeff_signs = torch.sign(coeffs[..., 0])  # [B]
+        te_signs = torch.sign(te_thickness)             # [B]
+        if not torch.all(first_coeff_signs == te_signs):
+            raise ValueError(
+                "Inconsistent surface orientation: first coefficient sign does not "
+                "match fitted trailing-edge thickness sign.\n"
+                f"First coeff signs: {first_coeff_signs.squeeze().tolist()}\n"
+                f"TE thickness signs: {te_signs.squeeze().tolist()}\n"
+                "This suggests mixed upper/lower surfaces in batch."
+            )
+
+        # If user provided surface_type, validate it matches the fitted sign
+        if surface_type is not None:
+            expected_sign = 1.0 if surface_type == "upper" else -1.0
+            if not torch.all(te_signs == expected_sign):
+                raise ValueError(
+                    f"Provided surface_type ('{surface_type}') conflicts with fitted solution.\n"
+                    f"Expected sign: {expected_sign}\n"
+                    f"Fitted signs: {te_signs.tolist()}"
+                )
 
         return cls(
             coefficients=coeffs,
             leading_edge_weight=le_weights,
-            trailing_edge_thickness=te_thickness,
-            surface=surface,
+            trailing_edge_thickness=te_thickness.abs(),
+            surface_type=surface_type,
             n1=n1,
             n2=n2,
             device=device,
         )
+
 
 if __name__ == "__main__":
 
@@ -1330,6 +1553,19 @@ if __name__ == "__main__":
 
     fig,ax = curve.plot()#[0].savefig("test")
     curve2.plot(fig=fig, ax=ax)[0].savefig("test2", )
+
+    bkcurve = KulfanModifiedCST(
+        coefficients=torch.rand(32, 4),
+        leading_edge_weight=torch.randn(32),
+        trailing_edge_thickness=torch.rand(32)/5,
+        device="cpu",
+    )
+    kcurve = KulfanModifiedCST(
+        coefficients=coeffs,
+        leading_edge_weight=torch.randn(1),
+        trailing_edge_thickness=torch.rand(1)/5,
+        device="cpu",
+    )
 
     x = torch.linspace(0, 1, 100)
     y = curve(x)
