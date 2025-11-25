@@ -1,8 +1,7 @@
 from .normalization import AirfoilNormalizer
-from .datafile import AirfoilDataFile, normalize_airfoil_dir
+from .datafile import AirfoilDataFile
 
 __all__ = [
     "AirfoilDataFile",
     "AirfoilNormalizer",
-    "normalize_airfoil_dir",
 ]

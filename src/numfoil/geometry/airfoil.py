@@ -331,7 +331,7 @@ class BsplineAirfoil(AirfoilBase):
         # the full name of the airfoil, usually from the file header
         self.description = name if description is None else description.replace(' AIRFOIL', '')
 
-        self.u_leading_edge = 0.5
+        self.u_leading_edge = self.surface_curve.u_leading_edge
 
     @classmethod
     def from_coordinate_array(
@@ -731,10 +731,10 @@ class BezierAirfoil(AirfoilBase):
             )
 
         if normalize:
-            normalized_bspline = AirfoilNormalizer.normalize(points, find_trailing_edge=find_trailing_edge)
+            normalized_bspline = AirfoilNormalizer.normalized_bspline(points, find_trailing_edge=find_trailing_edge)
             # If the bspline fits poorly and causes overlap, us the original points
             if np.any((normalized_bspline.evaluate_at(np.linspace(0, normalized_bspline.u_leading_edge, 1000)).y - normalized_bspline.evaluate_at(np.linspace(normalized_bspline.u_leading_edge, 1, 1000)).y).round(8) < 0):
-                points = AirfoilNormalizer.normalize(points, find_trailing_edge=find_trailing_edge, output="points").T.round(8)
+                points = AirfoilNormalizer.normalize_points(points).round(8)
                 # make sure the leading edge is included in the normalized
                 # points. this should not alter the curve in any way, as the
                 # origin should part of it after normalization. This simply adds
@@ -1218,7 +1218,7 @@ class CSTAirfoil(AirfoilBase):
             raise ValueError("Input array must have shape (n, 2).")
 
         if normalize:
-            points = AirfoilNormalizer.normalize(points, find_trailing_edge=True, output="points").T
+            points = AirfoilNormalizer.normalize_points(points).T#, find_trailing_edge=True).T
             # make sure the leading edge is included in the normalized
             # points. this should not alter the curve in any way, as the
             # origin should part of it after normalization. This simply adds
