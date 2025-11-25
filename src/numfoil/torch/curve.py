@@ -1391,7 +1391,7 @@ class KulfanModifiedCST(TorchCSTCurve):
     def fit(
         cls,
         points: torch.Tensor,
-        n_coefficients: int,
+        n_coefficients: int = 8,
         surface_type: Literal["upper", "lower"] = None,
         n1: float = 0.5,
         n2: float = 1.0,
@@ -1406,7 +1406,7 @@ class KulfanModifiedCST(TorchCSTCurve):
 
         Args:
             points: Sampled coordinates, shape [N, 2] or [B, N, 2].
-            n_coefficients: Number of CST coefficients (K).
+            n_coefficients: Number of CST coefficients (K). Default is 8.
             surface: "upper" or "lower" to control TE sign.
             n1 / n2: Class function exponents for the base CST curve.
             device: Optional torch.device override.
@@ -1427,7 +1427,7 @@ class KulfanModifiedCST(TorchCSTCurve):
         device = torch.device(device) if device is not None \
             else torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        points = torch.as_tensor(points, dtype=torch.float32, device=device)
+        points = torch.as_tensor(points.copy(), dtype=torch.float32, device=device)
 
         # Validate input shape
         if points.ndim not in (2, 3) or points.shape[-1] != 2:
@@ -1487,14 +1487,14 @@ class KulfanModifiedCST(TorchCSTCurve):
 
         # Tensor of trailing edge modifiers
         # if surface_type == "upper":
-        #     te_sign = torch.ones(B, 1, dtype=dtype, device=device)     # [B, 1]
+        #     te_signs = torch.ones(B, 1, dtype=dtype, device=device)     # [B, 1]
         # elif surface_type == "lower":
-        #     te_sign = -torch.ones(B, 1, dtype=dtype, device=device)    # [B, 1]
+        #     te_signs = -torch.ones(B, 1, dtype=dtype, device=device)    # [B, 1]
         # else:
-        #     te_sign = torch.sign(torch.diff(points[:, :2, 1], dim=1))  # [B, 1]
+        #     te_signs = torch.sign(torch.diff(points[:, :2, 1], dim=1))  # [B, 1]
 
         # [B, 1, 1] * [B, N, 1]
-        # te_mod = te_sign.unsqueeze(1) * x / 2.0                        # [B, N, 1]
+        # te_mod = te_signs.unsqueeze(1) * x / 2.0                        # [B, N, 1]
 
         te_mod = x / 2.0  # [B, N, 1]
 
@@ -1510,25 +1510,25 @@ class KulfanModifiedCST(TorchCSTCurve):
 
         # Validate surface type consistency
         first_coeff_signs = torch.sign(coeffs[..., 0])  # [B]
-        te_signs = torch.sign(te_thickness)             # [B]
-        if not torch.all(first_coeff_signs == te_signs):
-            raise ValueError(
-                "Inconsistent surface orientation: first coefficient sign does not "
-                "match fitted trailing-edge thickness sign.\n"
-                f"First coeff signs: {first_coeff_signs.squeeze().tolist()}\n"
-                f"TE thickness signs: {te_signs.squeeze().tolist()}\n"
-                "This suggests mixed upper/lower surfaces in batch."
-            )
+        # te_signs = torch.sign(te_thickness)             # [B]
+        # if not torch.all(first_coeff_signs == te_signs):
+        #     raise ValueError(
+        #         "Inconsistent surface orientation: first coefficient sign does not "
+        #         "match fitted trailing-edge thickness sign.\n"
+        #         f"First coeff signs: {first_coeff_signs.squeeze().tolist()}\n"
+        #         f"TE thickness signs: {te_signs.squeeze().tolist()}\n"
+        #         "This suggests mixed upper/lower surfaces in batch."
+        #     )
 
         # If user provided surface_type, validate it matches the fitted sign
-        if surface_type is not None:
-            expected_sign = 1.0 if surface_type == "upper" else -1.0
-            if not torch.all(te_signs == expected_sign):
-                raise ValueError(
-                    f"Provided surface_type ('{surface_type}') conflicts with fitted solution.\n"
-                    f"Expected sign: {expected_sign}\n"
-                    f"Fitted signs: {te_signs.tolist()}"
-                )
+        # if surface_type is not None:
+        #     expected_sign = 1.0 if surface_type == "upper" else -1.0
+        #     if not torch.all(te_signs == expected_sign):
+        #         raise ValueError(
+        #             f"Provided surface_type ('{surface_type}') conflicts with fitted solution.\n"
+        #             f"Expected sign: {expected_sign}\n"
+        #             f"Fitted signs: {te_signs.tolist()}"
+        #         )
 
         return cls(
             coefficients=coeffs,
