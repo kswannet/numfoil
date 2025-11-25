@@ -506,9 +506,10 @@ class AirfoilNormalizer:
         ax_te_zoom.plot(xx, yy, 'k', linewidth=1,)
         ax_te_zoom.plot(*spline_start, 'o', markersize=6, label="spline start")
         ax_te_zoom.plot(*spline_end, 'o', markersize=5, label="spline end")
+        ax_le_zoom.plot(*spline.points.T, 'bo', markersize=4, label="points")
         ax_te_zoom.plot(*upper_aft_pt, '*', markersize=6, label="upper TE solution")
         ax_te_zoom.plot(*lower_aft_pt, '*', markersize=5, label="lower TE solution")
-        ax_te_zoom.plot(*trailing_edge, 'rx', label="trailing edge")
+        ax_te_zoom.plot(*trailing_edge, '*', color="orange", label="Selected trailing edge")
         ax_te_zoom.plot(*spline.control_points.T, 'go-', markersize=1, linewidth=0.5, label="control points")
 
         ax_te_zoom.set_xlim(x_min, x_max)
@@ -542,11 +543,7 @@ class AirfoilNormalizer:
         ax_le_zoom.set_title("Leading Edge Zoom")
         # ax_le_zoom.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.1e"))
         ax_le_zoom.ticklabel_format(axis="x", style="sci", scilimits=(0, 0))
-
-        # Clean look
         ax_le_zoom.grid(True, linestyle="--", alpha=0.4)
-        # ax_le_zoom.yaxis.tick_right()
-        # ax_le_zoom.yaxis.set_label_position("left")
 
         ax_le_zoom.legend(loc="lower left", fontsize="small")
 
