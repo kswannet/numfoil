@@ -59,6 +59,21 @@ class Geom2D(np.ndarray):
 class Point2D(Geom2D):
     """Defines a point in 2D space."""
 
+    _default_precision = 6  # Default number of decimals (rounding precision)
+
+    def __new__(cls, array: Union[Sequence[Tuple[float, float]], np.ndarray]):
+        """Creates a :py:class:`Point2D` instance from ``array`` with automatic rounding."""
+        array = np.array(array) if not isinstance(array, np.ndarray) else array
+        assert is_row_vector(array)
+        return np.asarray(  # Round to class default precision
+            np.round(array, decimals=cls._default_precision), dtype=np.float64
+        ).view(cls)
+
+    @classmethod
+    def set_precision(cls, decimals: int):
+        """Set the default precision for all Point2D instances."""
+        cls._default_precision = decimals
+
     def __sub__(self, other) -> Vector2D:
         """Overloads subtract magic method to allow vector creation.
 
@@ -96,7 +111,6 @@ class Point2D(Geom2D):
         plt.title("Point2D Array")
         plt.grid(True)
         plt.show()
-
 
 
 class Vector2D(Geom2D):

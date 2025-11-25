@@ -89,12 +89,18 @@ class Curve(ABC):
         curvature = self.curvature_at(x)
         return np.where(curvature != 0, 1 / curvature, np.inf)
 
-    def plot(self, num_points: int = 2000) -> None:
+    def plot(self, num_points: int = 2000, fig=None, ax=None, save=True) -> None:
         """Plot the curve using matplotlib."""
-        plt.plot(*self.evaluate_at(np.linspace(0,1,num_points)).T)
-        plt.xlabel("X")
-        plt.ylabel("Y")
+        if fig is None and ax is None:
+            fig, ax = plt.subplots()
+        ax.plot(*self.evaluate_at(np.linspace(0,1,num_points)).T)
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        if save:
+            fig.savefig(f"spline_plot.pdf")
         plt.show(block=False)
+        return fig, ax
+
 
     # @staticmethod
     # def arc_lengths(points: np.ndarray, normalize: bool = True) -> np.ndarray:
@@ -348,7 +354,7 @@ class BSpline2D(ParametricCurve):
             f"Trying to replace degree {self.spline[2]} with {value}."
             )
 
-    def evaluate_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
+    def evaluate_at(self, u: Union[float, np.ndarray], dtype=np.float64) -> np.ndarray:
         """
         Evaluate the curve at specified parameter values ``u``.
 
@@ -359,9 +365,9 @@ class BSpline2D(ParametricCurve):
         Returns:
             ndarray: The evaluated point(s) on the spline.
         """
-        return np.asarray(si.splev(u, self.spline, der=0), dtype=np.float64).T.view(Point2D)#.round(8)
+        return np.asarray(si.splev(u, self.spline, der=0), dtype=dtype).T.view(Point2D)
 
-    def first_deriv_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
+    def first_deriv_at(self, u: Union[float, np.ndarray], dtype=np.float64) -> np.ndarray:
         """
         Evaluate the curve's first derivative(s) at specified parameter values
         ``u``.
@@ -373,9 +379,9 @@ class BSpline2D(ParametricCurve):
         Returns:
             ndarray: The evaluated point(s) on the spline.
         """
-        return np.asarray(si.splev(u, self.spline, der=1), dtype=np.float64).T
+        return np.asarray(si.splev(u, self.spline, der=1), dtype=dtype).T
 
-    def second_deriv_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
+    def second_deriv_at(self, u: Union[float, np.ndarray], dtype=np.float64) -> np.ndarray:
         """
         Evaluate the curve's second derivative(s) at specified parameter values
         ``u``.
@@ -387,7 +393,7 @@ class BSpline2D(ParametricCurve):
         Returns:
             ndarray: The evaluated point(s) on the spline.
         """
-        return np.asarray(si.splev(u, self.spline, der=2), dtype=np.float64).T
+        return np.asarray(si.splev(u, self.spline, der=2), dtype=dtype).T
 
 
 class Bezier(ParametricCurve):
@@ -720,7 +726,7 @@ class  SplevBezier(ParametricCurve):
         )
         return knot_vector
 
-    def evaluate_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
+    def evaluate_at(self, u: Union[float, np.ndarray], dtype=np.float64) -> np.ndarray:
         """
         Evaluate the curve at specified parameter values ``u``.
 
@@ -731,9 +737,9 @@ class  SplevBezier(ParametricCurve):
         Returns:
             ndarray: The evaluated point(s) on the spline.
         """
-        return np.asarray(si.splev(u, self.spline, der=0), dtype=np.float64).T.view(Point2D)#.round(8)
+        return np.asarray(si.splev(u, self.spline, der=0), dtype=dtype).T.view(Point2D)
 
-    def first_deriv_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
+    def first_deriv_at(self, u: Union[float, np.ndarray], dtype=np.float64) -> np.ndarray:
         """
         Evaluate the curve's first derivative(s) at specified parameter values
         ``u``.
@@ -745,9 +751,9 @@ class  SplevBezier(ParametricCurve):
         Returns:
             ndarray: The evaluated point(s) on the spline.
         """
-        return np.asarray(si.splev(u, self.spline, der=1), dtype=np.float64).T
+        return np.asarray(si.splev(u, self.spline, der=1), dtype=dtype).T
 
-    def second_deriv_at(self, u: Union[float, np.ndarray]) -> np.ndarray:
+    def second_deriv_at(self, u: Union[float, np.ndarray], dtype=np.float64) -> np.ndarray:
         """
         Evaluate the curve's second derivative(s) at specified parameter values
         ``u``.
@@ -759,7 +765,7 @@ class  SplevBezier(ParametricCurve):
         Returns:
             ndarray: The evaluated point(s) on the spline.
         """
-        return np.asarray(si.splev(u, self.spline, der=2), dtype=np.float64).T
+        return np.asarray(si.splev(u, self.spline, der=2), dtype=dtype).T
 
     @classmethod
     def from_control_points(cls, control_points):
@@ -1859,8 +1865,6 @@ class CSTCurve(Curve):
     d2C = class_second_deriv
     dS = shape_first_deriv
     d2S = shape_second_deriv
-
-
 
 
 class CSTAirfoilSurface:
