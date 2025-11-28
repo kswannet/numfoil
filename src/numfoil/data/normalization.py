@@ -160,7 +160,7 @@ class AirfoilNormalizer:
         x, y = points[:, 0], points[:, 1]
         mask = np.ones(len(points), dtype=bool)
         for i in np.where(np.isclose(np.diff(x), 0))[0]:
-            mask[i + (abs(y[i + 1]) < abs(y[i]))] = False
+            mask[i + (abs(y[i + 1]) > abs(y[i]))] = False
         return points[mask]
 
     @staticmethod
@@ -187,9 +187,10 @@ class AirfoilNormalizer:
         if len(points) < 4:
             return points
 
-        # just some settings to mess with. currently not accessible from outside
-        n_fill = 2 # number of points to insert per gap
-        n_interp = 3 # number of points to use for interpolation on each side of the gap
+        # The number of points to insert and interpolation points now depend on gap size
+        # // just some settings to mess with. currently not accessible from outside
+        # // n_fill = 3 # number of points to insert per gap
+        # // n_interp = 3 # number of points to use for interpolation on each side of the gap
 
         # Calculate gaps between consecutive x-coordinates
         x_diffs = np.abs(np.diff(points[:, 0]))
@@ -198,25 +199,25 @@ class AirfoilNormalizer:
         if len(gap_indices) == 0:
             return points  # No gaps to fill
 
-        # interpolate
-        # f_interp = si.interp1d(
-        #     points[:, 0], points[:, 1],
-        #     kind='cubic',
-        #     bounds_error=False,
-        #     fill_value='extrapolate'
-        # )
-
         # Work backwards through gaps to avoid index shifting when inserting
         filled_points = points.copy()
         for gap_idx in reversed(gap_indices):
-            require_reverse = False
+            # number of infill points depends on the gap size
+            gap_size = x_diffs[gap_idx]
+
+            # add in one point per ~0.11 gap size
+            n_fill = int(gap_size // 0.11)
+
+            # use at least 3 points on either side for interpolation, but add more for larger gaps
+            n_interp = max(3, int(gap_size // 0.11))
+
             # Points on either side of the gap
             pt1 = filled_points[gap_idx]
             pt2 = filled_points[gap_idx + 1]
             filler_x = np.linspace(pt1[0], pt2[0], num=n_fill + 2)[1:-1]  # 3 points in between
 
             flank_pts = filled_points[
-                min(gap_idx, max(0, gap_idx - n_interp)) : min(len(filled_points), gap_idx + 1 + n_interp)
+                min(gap_idx, max(0, gap_idx - n_interp + 1)) : min(len(filled_points), gap_idx + n_interp)
             ]  # n_interp points on either side of the gap
             if np.all(np.diff(flank_pts[:, 0])<0):
                 flank_pts = flank_pts[::-1]
@@ -283,8 +284,6 @@ class AirfoilNormalizer:
         spline_end = spline.control_points[-1]#.round(7).view(Point2D)
         upper_aft_pt = spline.evaluate_at(upper_search_result.x[0])#.round(7).view(Point2D)
         lower_aft_pt = spline.evaluate_at(lower_search_result.x[0])#.round(7).view(Point2D)
-        # u_upper_aft = upper_search_result.x[0]
-        # u_lower_aft = lower_search_result.x[0]
         return spline_start, spline_end, upper_aft_pt, lower_aft_pt
 
     @classmethod
@@ -428,15 +427,31 @@ class AirfoilNormalizer:
                 (commented out), but switched to removing points on both sides
                 as the yields cleaner results overall.
             """
+            # * First try a gentle nudge is the overshoot is small
+            if max(upper_aft_pt.x, lower_aft_pt.x) - 1.0 < 1e-4:
+                ctrl_pts = spline.control_points.copy()
+                ctrl_pts[ctrl_pts.x - 1e-8 > 1.0, 0] = 0.9995
+                spline.control_points = ctrl_pts
+
+            (  # recalculate key locations
+                spline_start,
+                spline_end,
+                upper_aft_pt,
+                lower_aft_pt,
+            ) = cls._get_key_locations(spline)
+
+            # * if not fixed yet, start removing points
             while not (
                 np.allclose(upper_aft_pt, spline_start, rtol=0)
                 and np.allclose(lower_aft_pt, spline_end, rtol=0)
             ):
                 points = spline.points.copy()
+                # * Remove points on the overshooting side only
                 # if not np.all(upper_aft_pt == spline_start):    # upper aft point not at start (overshoot)
                 #     points = points[1:]                         # remove first point
                 # if not np.all(lower_aft_pt == spline_end):      # lower aft point not at end (overshoot)
                 #     points = points[:-1]                        # remove last point
+                # * remove points on both sides
                 spline = BSpline2D(points[1:-1])                  # rebuild spline
                 (
                     spline_start,
@@ -500,13 +515,13 @@ class AirfoilNormalizer:
         # --- Zoomed TE Region ---
         x_min = min(upper_aft_pt.x, lower_aft_pt.x, trailing_edge.x, spline.points.x[0], spline.points.x[-1], spline.control_points.x[1], spline.control_points.x[-2]) - 0.005
         x_max = max(upper_aft_pt.x, lower_aft_pt.x, trailing_edge.x, spline.points.x[0], spline.points.x[-1], spline.control_points.x[1], spline.control_points.x[-2]) + 0.0005
-        y_min = min(upper_aft_pt.y, lower_aft_pt.y, trailing_edge.y, spline.points.y[0], spline.points.y[-1], spline.control_points.y[1], spline.control_points.y[-2]) - 0.001
-        y_max = max(upper_aft_pt.y, lower_aft_pt.y, trailing_edge.y, spline.points.y[0], spline.points.y[-1], spline.control_points.y[1], spline.control_points.y[-2]) + 0.001
+        y_min = min(upper_aft_pt.y, lower_aft_pt.y, trailing_edge.y, spline.points.y[0], spline.points.y[-1], spline.control_points.y[1], spline.control_points.y[-2])*1.3 - 0.001
+        y_max = max(upper_aft_pt.y, lower_aft_pt.y, trailing_edge.y, spline.points.y[0], spline.points.y[-1], spline.control_points.y[1], spline.control_points.y[-2])*1.3 + 0.001
 
         ax_te_zoom.plot(xx, yy, 'k', linewidth=1,)
         ax_te_zoom.plot(*spline_start, 'o', markersize=6, label="spline start")
         ax_te_zoom.plot(*spline_end, 'o', markersize=5, label="spline end")
-        ax_le_zoom.plot(*spline.points.T, 'bo', markersize=4, label="points")
+        ax_te_zoom.plot(*spline.points.T, 'bo', markersize=4, label="points")
         ax_te_zoom.plot(*upper_aft_pt, '*', markersize=6, label="upper TE solution")
         ax_te_zoom.plot(*lower_aft_pt, '*', markersize=5, label="lower TE solution")
         ax_te_zoom.plot(*trailing_edge, '*', color="orange", label="Selected trailing edge")
@@ -522,7 +537,7 @@ class AirfoilNormalizer:
         ax_te_zoom.grid(True, linestyle="--", alpha=0.4)
         ax_te_zoom.yaxis.tick_right()
         ax_te_zoom.yaxis.set_label_position("right")
-        ax_te_zoom.legend(loc="lower left", fontsize="small")
+        ax_te_zoom.legend(loc="center left", fontsize="small")
 
         mark_inset(ax, ax_te_zoom, loc1=2, loc2=3, fc="none", ec="0.5")
 

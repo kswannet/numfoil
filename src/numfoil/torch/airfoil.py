@@ -4,6 +4,8 @@ from typing import Optional, Tuple, Literal
 from .curve import TorchCSTCurve, KulfanModifiedCST
 from functools import cached_property
 
+from ..util import cosine_spacing
+
 import numpy as np
 
 from ..data import datafile, normalization
@@ -114,7 +116,7 @@ class TorchKulfanAirfoil(nn.Module):
             raise ValueError(
                 f"Parameters tensor must be 2D (batch, n_params), got shape {parameters.shape}"
             )
-        n_params = parameters.shape[1]
+        n_params = parameters.shape[-1]
         if n_params < 4:
             raise ValueError(
                 f"Need at least 4 parameters (1 upper, 1 lower, w_le, t_te), got {n_params}"
@@ -165,6 +167,20 @@ class TorchKulfanAirfoil(nn.Module):
         )
 
     @property
+    def kulfan_params(self) -> torch.Tensor:
+        """Get Kulfan parameters as a single tensor.
+
+        Returns:
+        torch.Tensor, shape [batch, 2*n_coeffs + 2]
+        """
+        return torch.cat([
+            self.upper_surface.coefficients,            # [B, n_coeffs]
+            self.lower_surface.coefficients,            # [B, n_coeffs]
+            self.upper_surface.leading_edge_weight,     # [B, 1]
+            self.upper_surface.trailing_edge_thickness, # [B, 1]
+        ], dim=-1).squeeze()
+
+    @property
     def batch_size(self) -> int:
         # sanity check, shouldn't trigger due to earlier validation, but just in case
         if self.upper_surface.batch_size != self.lower_surface.batch_size:
@@ -177,6 +193,14 @@ class TorchKulfanAirfoil(nn.Module):
     @property
     def is_batched(self) -> bool:
         return self.batch_size > 1
+
+    @property
+    def shape(self) -> Tuple[int, int]:
+        return (self.batch_size, self.upper_surface.n_coefficients)
+
+    @property
+    def __len__(self) -> int:
+        return self.batch_size
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -202,12 +226,59 @@ class TorchKulfanAirfoil(nn.Module):
         """
         y_upper, y_lower = self.forward(x)
 
-        # Standard Selig format: upper TE→LE (reversed), then lower LE→TE
+        # Standard Selig format: upper TE to LE (reversed), then lower LE to TE
         x_full = torch.cat([x.flip(0), x[1:]])
         y_full = torch.cat([y_upper.flip(-1), y_lower[:, 1:]], dim=-1)
 
         x_batched = x_full.unsqueeze(0).expand(self.batch_size, -1)
         return torch.stack([x_batched, y_full], dim=-1)
+
+    @property
+    def points(self, n_points: int = 100) -> torch.Tensor:
+        """
+        Get airfoil points at cosine-spaced locations.
+
+        Args:
+            n_points: Number of chordwise points per surface.
+
+        Returns:
+            Coordinates, shape [batch, 2*n_points-1, 2]
+        """
+        x = torch.as_tensor(cosine_spacing(0, 1, n_points), device=self.device)
+
+        upper = self.upper_surface(x)  # [B>1, 100]
+        lower = self.lower_surface(x)  # [B>1, 100]
+
+        if self.is_batched:
+            x = x.unsqueeze(0).expand(self.batch_size, -1)  # [B, 100]
+
+        return torch.cat([
+            torch.stack([x, upper], dim=-1).flip(dims=[-2]),  # [B, 100, 2] reversed
+            torch.stack([x, lower], dim=-1)[..., 1:, :],      # [B, 100, 2] skip LE
+            ], dim=-2
+        ).squeeze() # [B>1, 199, 2]
+
+    def upper_surface_at(self, x: torch.Tensor) -> torch.Tensor:
+        """Evaluate upper surface at given x locations.
+
+        Args:
+            x: Chordwise locations, shape (n_points,)
+
+        Returns:
+            y_upper: Upper surface y-coordinates, shape (batch, n_points)
+        """
+        return self.upper_surface(x)
+
+    def lower_surface_at(self, x: torch.Tensor) -> torch.Tensor:
+        """Evaluate lower surface at given x locations.
+
+        Args:
+            x: Chordwise locations, shape (n_points,)
+
+        Returns:
+            y_lower: Lower surface y-coordinates, shape (batch, n_points)
+        """
+        return self.lower_surface(x)
 
     def thickness_at(self, x: torch.Tensor) -> torch.Tensor:
         """Local thickness t(x) = y_upper(x) - y_lower(x)"""
@@ -215,10 +286,17 @@ class TorchKulfanAirfoil(nn.Module):
         return y_upper - y_lower
 
     def camber_at(self, x: torch.Tensor) -> torch.Tensor:
-        """Local camber c(x) = (y_upper(x) + y_lower(x)) / 2"""
+        """Local camber c(x) = (y_upper(x) + y_lower(x)) / 2
+
+        Args:
+            x: Chordwise locations, shape (n_points,)
+        Returns:
+            c: Camber values, shape (batch, n_points)
+        """
         y_upper, y_lower = self.forward(x)
         return (y_upper + y_lower) / 2
 
+    @property
     def max_thickness(self, x: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Find maximum thickness and its location.
@@ -238,6 +316,7 @@ class TorchKulfanAirfoil(nn.Module):
 
         return t_max, x_max
 
+    @property
     def max_camber(self, x: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Find maximum camber and its location.
@@ -258,6 +337,7 @@ class TorchKulfanAirfoil(nn.Module):
 
         return c_max, x_max
 
+    @property
     def leading_edge_radius(self) -> torch.Tensor:
         """
         Estimate leading edge radius using curvature at x=0.
@@ -277,6 +357,7 @@ class TorchKulfanAirfoil(nn.Module):
 
         return 1.0 / (kappa_avg + self.eps)  # Avoid division by zero
 
+    @property
     def trailing_edge_angle(self) -> torch.Tensor:
         """
         Compute trailing edge wedge angle in degrees.
@@ -293,6 +374,7 @@ class TorchKulfanAirfoil(nn.Module):
         angle_rad = torch.atan(dy_upper) - torch.atan(dy_lower)
         return torch.abs(angle_rad) * 180 / torch.pi
 
+    @property
     def trailing_edge_thickness(self) -> torch.Tensor:
         """
         Actual trailing edge thickness at x=1.
@@ -303,6 +385,7 @@ class TorchKulfanAirfoil(nn.Module):
         x_te = torch.tensor([1.0], device=self.device)
         return self.thickness_at(x_te).squeeze(-1)
 
+    @property
     def area(self, n_points: int = 1000) -> torch.Tensor:
         """
         Compute airfoil cross-sectional area using numerical integration.
@@ -367,7 +450,6 @@ class TorchKulfanAirfoil(nn.Module):
         n2: float = 1.0,
         device: Optional[torch.device | str] = None,
         rcond: Optional[float] = None,
-        prevent_overlap: bool = False,
     ) -> "TorchKulfanAirfoil":
         """Jointly fit upper and lower surfaces to Selig-format coordinates with
         shared Kulfan modifiers for leading and trailing edge.
@@ -427,8 +509,8 @@ class TorchKulfanAirfoil(nn.Module):
         target_device = torch.device(device) if device is not None else torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
         )
-        if upper_points.ndim > 2 or upper_points.shape[-1] != 2 or \
-           lower_points.ndim > 2 or lower_points.shape[-1] != 2:
+        if upper_points.ndim > 3 or upper_points.shape[-1] != 2 or \
+           lower_points.ndim > 3 or lower_points.shape[-1] != 2:
             raise ValueError(
                 "coordinates must have shape [N, 2], but got:\n"
                 f" upper_points.shape={upper_points.shape}, "
@@ -558,13 +640,17 @@ class TorchKulfanAirfoil(nn.Module):
             shared_le_weight = solution[..., -2]
             shared_te_thickness_signed = solution[..., -1]
 
+            # first coefficient on either side must be clamped
+            upper_coeffs[..., 0] = torch.clamp(upper_coeffs[..., 0], min=eps)
+            lower_coeffs[..., 0] = torch.clamp(lower_coeffs[..., 0], max=-eps)
+
             # Ensure TE thickness is positive
             shared_te_thickness = torch.abs(shared_te_thickness_signed)
 
             # Infer surface types from signs
-            upper_sign = torch.sign(upper_coeffs[0])
-            lower_sign = torch.sign(lower_coeffs[0])
-            te_sign = torch.sign(shared_te_thickness_signed)
+            # upper_sign = torch.sign(upper_coeffs[0])
+            # lower_sign = torch.sign(lower_coeffs[0])
+            # te_sign = torch.sign(shared_te_thickness_signed)
 
             # if upper_sign != te_sign or lower_sign != -te_sign:
             #     raise ValueError("Inconsistent surface signs in fitted solution.")

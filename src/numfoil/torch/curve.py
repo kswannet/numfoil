@@ -755,7 +755,15 @@ class TorchCSTCurve(nn.Module):
         """
         return cls(torch.tensor(coefficients, dtype=torch.float32), n1, n2, device=device)
 
-    def plot(self, idx: int = None, n_points: int = 1000, spacing: str = "cosine", ax=None, fig=None, **plot_kwargs):
+    def plot(
+        self,
+        idx: int = None,
+        n_points: int = 1000,
+        spacing: str = "cosine",
+        ax=None,
+        fig=None,
+        **plot_kwargs,
+    ):
         """
         Plot the CST curve using Matplotlib.
 

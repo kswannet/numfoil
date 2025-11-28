@@ -80,6 +80,50 @@ def split_at_le(
     )
 
 
+def split_upper_lower(
+    points: np.ndarray, le_tol: float = 1e-6, window: int = 3
+) -> tuple[np.ndarray, np.ndarray]:
+    """Split Selig-format coordinates (
+    upper TE→LE, lower LE→TE) into upper/lower arrays.
+
+    Args:
+        points (ndarray): Airfoil coordinates in Selig format.
+        le_tol (float): Tolerance for detecting explicit leading-edge point at
+        (0,0). Defaults to 1e-6.
+        window (int): Number of points on either side of min-x point to search
+        for y-sign change. Defaults to 3.
+
+    Returns:
+        tuple[ndarray, ndarray]: Upper and lower surface coordinates.
+
+    Raises:
+        ValueError: If no sign change is found near the leading edge.
+    """
+    pts = np.asarray(points, dtype=float)
+    le_idx = int(np.argmin(pts[:, 0]))
+
+    # Explicit [0,0] leading edge: share point between surfaces
+    if np.allclose(pts[le_idx], 0.0, atol=le_tol):
+        return pts[: le_idx + 1].copy(), pts[le_idx:].copy()
+
+    # Find sign change in y within window around min-x point
+    start, end = max(0, le_idx - window), min(len(pts), le_idx + window + 1)
+    y_signs = np.sign(pts[start:end, 1])
+    change = np.flatnonzero(y_signs[:-1] != y_signs[1:])
+
+    if len(change) == 0:
+        raise ValueError("no sign change near leading edge")
+
+    split_idx = start + change[0] + 1
+    upper, lower = pts[:split_idx].copy(), pts[split_idx:].copy()
+
+    # Ensure upper surface has positive y near LE
+    if upper[-1, 1] < lower[0, 1]:
+        upper, lower = lower[::-1], upper[::-1]
+
+    return upper, lower
+
+
 def cosine_spacing(start: float, stop: float, num: int, a: float = 1.0) -> np.ndarray:
     """Return cosine-spaced numbers over a specified interval.
     Returns `num` cosine-spaced samples, calculated over the
