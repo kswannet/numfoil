@@ -147,11 +147,13 @@ class TorchKulfanAirfoil(nn.Module):
         n2: float = 1.0,
         device: Optional[torch.device | str] = None,
         ) -> "TorchKulfanAirfoil":
+        t_te = abs(t_te)  # ensure non-negative TE thickness
         return cls(
             KulfanModifiedCST(
                 upper_coeffs,
                 leading_edge_weight=w_le,
                 trailing_edge_thickness=t_te,
+                surface_type="upper",
                 n1=n1,
                 n2=n2,
                 device=device,
@@ -160,6 +162,7 @@ class TorchKulfanAirfoil(nn.Module):
                 lower_coeffs,
                 leading_edge_weight=w_le,
                 trailing_edge_thickness=t_te,
+                surface_type="lower",
                 n1=n1,
                 n2=n2,
                 device=device,
@@ -196,7 +199,7 @@ class TorchKulfanAirfoil(nn.Module):
 
     @property
     def shape(self) -> Tuple[int, int]:
-        return (self.batch_size, self.upper_surface.n_coefficients)
+        return self.kulfan_params.shape
 
     @property
     def __len__(self) -> int:
@@ -212,9 +215,9 @@ class TorchKulfanAirfoil(nn.Module):
         Returns:
             (y_upper, y_lower), both shape (batch, n_points)
         """
-        return self.upper(x), self.lower(x)
+        return self.upper_surface_at(x), self.lower_surface_at(x)
 
-    def get_coordinates(self, x: torch.Tensor) -> torch.Tensor:
+    def coordinates_at(self, x: torch.Tensor) -> torch.Tensor:
         """
         Get airfoil coordinates in standard counterclockwise format.
 
@@ -234,9 +237,9 @@ class TorchKulfanAirfoil(nn.Module):
         return torch.stack([x_batched, y_full], dim=-1)
 
     @property
-    def points(self, n_points: int = 100) -> torch.Tensor:
+    def points(self, n_points: int = 100, dtype=torch.float32) -> torch.Tensor:
         """
-        Get airfoil points at cosine-spaced locations.
+        Get airfoil points at cosine-spaced locations in Selig format.
 
         Args:
             n_points: Number of chordwise points per surface.
@@ -244,19 +247,23 @@ class TorchKulfanAirfoil(nn.Module):
         Returns:
             Coordinates, shape [batch, 2*n_points-1, 2]
         """
-        x = torch.as_tensor(cosine_spacing(0, 1, n_points), device=self.device)
+        x = torch.as_tensor(
+            cosine_spacing(0, 1, n_points),
+            device=self.device,
+            dtype=dtype,
+        )
 
-        upper = self.upper_surface(x)  # [B>1, 100]
-        lower = self.lower_surface(x)  # [B>1, 100]
+        upper = self.upper_surface(x).to(dtype=dtype)  # [B>1, 100]
+        lower = self.lower_surface(x).to(dtype=dtype)  # [B>1, 100]
 
         if self.is_batched:
             x = x.unsqueeze(0).expand(self.batch_size, -1)  # [B, 100]
 
         return torch.cat([
             torch.stack([x, upper], dim=-1).flip(dims=[-2]),  # [B, 100, 2] reversed
-            torch.stack([x, lower], dim=-1)[..., 1:, :],      # [B, 100, 2] skip LE
+            torch.stack([x, lower], dim=-1)[..., 1:, :],      # [B, 99, 2] skip LE
             ], dim=-2
-        ).squeeze() # [B>1, 199, 2]
+        ).to(dtype=dtype).squeeze() # [B>1, 199, 2]
 
     def upper_surface_at(self, x: torch.Tensor) -> torch.Tensor:
         """Evaluate upper surface at given x locations.
@@ -418,25 +425,92 @@ class TorchKulfanAirfoil(nn.Module):
         x = 0.5 * (1.0 - torch.cos(beta))
         return torch.all(self.thickness(x) >= 0).item()
 
-    def plot(self):
-        """Plot airfoil using matplotlib."""
+    def plot(
+        self,
+        idx: int = 0,
+        name: Optional[str] = None,
+        save_dir: Optional[str] = None,
+    ) -> "plt.Figure":
+        """Plot airfoil using matplotlib.
+
+        Args:
+            idx (int): Index of airfoil to plot in batch.
+            name (Optional[str]): Title for the plot.
+            save_dir (Optional[str]): Directory to save the plot.
+                Default None, does not save.
+
+        Returns:
+            Tuple[plt.Figure, plt.Axes]
+        """
         import matplotlib.pyplot as plt
 
-        x = torch.linspace(0, 1, 500, device=self.device)
+        x = torch.linspace(0, 1, 2000, device=self.device)
         y_upper, y_lower = self.forward(x)
 
-        plt.figure(figsize=(8, 4))
-        for i in range(self.batch_size):
-            plt.plot(x.cpu(), y_upper[i].cpu(), 'b-', label='Upper Surface' if i == 0 else "")
-            plt.plot(x.cpu(), y_lower[i].cpu(), 'r-', label='Lower Surface' if i == 0 else "")
-        plt.axis('equal')
-        plt.title('Kulfan Airfoil')
-        plt.xlabel('x (Chordwise)')
-        plt.ylabel('y (Vertical)')
-        plt.grid(True)
-        if self.batch_size == 1:
-            plt.legend()
-        plt.show()
+        if not self.is_batched:
+            y_upper = y_upper.unsqueeze(0)
+            y_lower = y_lower.unsqueeze(0)
+
+        x = x.detach().cpu().numpy()
+        y_upper = y_upper.detach().cpu().numpy()
+        y_lower = y_lower.detach().cpu().numpy()
+
+        figsize = (10, 6) #if not self.is_batched else (10, 4)
+
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.plot(x, y_upper[idx], 'b-', label='Upper Kulfan Surface')
+        ax.plot(x, y_lower[idx], 'r-', label='Lower Kulfan Surface')
+        ax.axis('equal')
+        ax.set_title(name or 'Kulfan Airfoil')
+        ax.set_xlabel('x/c')
+        ax.set_ylabel('y/c')
+        ax.axis('equal')
+        ax.grid(True)
+        ax.legend()
+        ax.set_facecolor("white")
+        plt.tight_layout()
+
+        # if there is only one airfoil, display parameters
+        if not self.is_batched:
+            # Get parameters for the selected airfoil (idx)
+            upper_coeffs = self.upper_surface.coefficients[idx].detach().cpu().numpy().round(4)
+            lower_coeffs = self.lower_surface.coefficients[idx].detach().cpu().numpy().round(4)
+            w_le = self.upper_surface.leading_edge_weight[idx].item()
+            t_te = self.upper_surface.trailing_edge_thickness[idx].item()
+
+            # # Format the textbox text
+            # textstr = (f"Upper coeffs: {upper_coeffs.round(4)}\n"
+            #     f"Lower coeffs: {lower_coeffs.round(4)}\n"
+            #     f"LE weight:       {w_le:.4f}\n"
+            #     f"TE thickness:    {t_te:.4f}")
+
+            # # Add textbox under the plot
+            # plt.subplots_adjust(bottom=0.225, top=0.9)  # Adjust bottom margin to create space
+            # plt.figtext(0.2, 0.03, textstr, fontsize=10, bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue"))
+
+            # Format as aligned columns (monospace helps alignment)
+            row_format = "{:<14} " + " ".join(["{:>8.4f}"] * len(upper_coeffs))
+
+            textstr = (
+                row_format.format("Upper coeffs:", *upper_coeffs) + "\n" +
+                row_format.format("Lower coeffs:", *lower_coeffs) + "\n" +
+                f"{'LE weight:':<15} {w_le:>8.4f}\n"
+                f"{'TE thickness:':<14} {t_te:>8.4f}"
+            )
+            plt.subplots_adjust(bottom=0.245, top=0.925)  # Adjust bottom margin to create space
+            plt.figtext(
+                0.1, 0.0275, textstr, fontsize=10,
+                # fontfamily="monospace",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white"),
+                linespacing=1.5,
+            )
+
+
+
+        if save_dir is not None:
+            filepath = f"{save_dir}"
+            fig.savefig(filepath, )
+        return fig, ax
 
     @classmethod
     def fit(

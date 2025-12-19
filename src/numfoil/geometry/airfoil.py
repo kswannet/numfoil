@@ -10,7 +10,8 @@ from typing import Union, Tuple
 from abc import ABCMeta, abstractmethod, ABC
 from  warnings import warn as warning
 
-from ..data import AirfoilDataFile, AirfoilNormalizer
+from ..data.datafile import AirfoilDataFile
+from ..data.normalization import AirfoilNormalizer
 from ..util import cosine_spacing, chebyshev_nodes, ensure_1d_vector, selig
 from .spline import *
 from .geom2d import Point2D

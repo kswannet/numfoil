@@ -1,16 +1,16 @@
-from functools import cached_property
-import matplotlib.ticker as mticker
-from numfoil.legacy.geometry import spline
 import numpy as np
-from typing import Tuple
 import scipy.interpolate as si
 import scipy.optimize as opt
-from ..geometry.spline import BSpline2D, SplevCBezier
-from ..geometry.geom2d import Point2D, Geom2D
 import os
+
+from typing import Tuple
 from tqdm import tqdm
+
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1.inset_locator import zoomed_inset_axes, mark_inset
+
+from ..geometry.spline import BSpline2D, SplevCBezier
+from ..geometry.geom2d import Point2D, Geom2D
 
 
 class AirfoilNormalizer:

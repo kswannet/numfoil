@@ -1,4 +1,3 @@
-from ..geometry.airfoil import NACA4Airfoil
 from ..geometry.geom2d import (
     Point2D,
     Vector2D,
@@ -11,9 +10,7 @@ from .panel import Panel2D
 from .spline import BSpline2D
 
 __all__ = [
-    "Airfoil",
     "BSpline2D",
-    "NACA4Airfoil",
     "Panel2D",
     "Point2D",
     "UIUCAirfoil",

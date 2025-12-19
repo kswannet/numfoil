@@ -150,6 +150,11 @@ class TorchCSTCurve(nn.Module):
         """Alias for degree of the Bernstein polynomial"""
         return self.degree
 
+    @property
+    def fitted_points(self) -> torch.Tensor | None:
+        """Original points used for fitting, if available."""
+        return getattr(self, "_fitted_points", None)
+
     @staticmethod
     def _ensure_1d(x: torch.Tensor) -> torch.Tensor:
         """Ensure input tensor is at least 1D.
@@ -910,7 +915,9 @@ class TorchCSTCurve(nn.Module):
         # if single_curve:
         #     coeffs = coeffs.squeeze(0)  # [K]
 
-        return cls(coeffs.squeeze(0), n1=n1, n2=n2, device=device)
+        curve = cls(coeffs.squeeze(0), n1=n1, n2=n2, device=device)
+        curve._fitted_points = points.detach().clone()  # shape [B, N, 2]
+        return curve
 
 
 class KulfanModifiedCST(TorchCSTCurve):
@@ -1493,7 +1500,7 @@ class KulfanModifiedCST(TorchCSTCurve):
         # Now the tensor of leading edge modifiers
         le_mod = x * torch.pow(1.0 - x, n + 0.5)          # [B, N, 1]
 
-        # Tensor of trailing edge modifiers
+        # # Tensor of trailing edge modifiers
         # if surface_type == "upper":
         #     te_signs = torch.ones(B, 1, dtype=dtype, device=device)     # [B, 1]
         # elif surface_type == "lower":
@@ -1516,8 +1523,8 @@ class KulfanModifiedCST(TorchCSTCurve):
         le_weights = solution[..., -2].squeeze()               # [B] or [1]
         te_thickness = solution[..., -1].squeeze()             # [B] or [1]
 
-        # Validate surface type consistency
-        first_coeff_signs = torch.sign(coeffs[..., 0])  # [B]
+        # # Validate surface type consistency
+        # first_coeff_signs = torch.sign(coeffs[..., 0])  # [B]
         # te_signs = torch.sign(te_thickness)             # [B]
         # if not torch.all(first_coeff_signs == te_signs):
         #     raise ValueError(
@@ -1538,7 +1545,7 @@ class KulfanModifiedCST(TorchCSTCurve):
         #             f"Fitted signs: {te_signs.tolist()}"
         #         )
 
-        return cls(
+        curve = cls(
             coefficients=coeffs,
             leading_edge_weight=le_weights,
             trailing_edge_thickness=te_thickness.abs(),
@@ -1547,6 +1554,8 @@ class KulfanModifiedCST(TorchCSTCurve):
             n2=n2,
             device=device,
         )
+        curve._fitted_points = points.detach().clone()  # shape [B, N, 2]
+        return curve
 
 
 if __name__ == "__main__":
