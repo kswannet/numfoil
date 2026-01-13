@@ -17,6 +17,8 @@ from .spline import *
 from .geom2d import Point2D
 
 
+EPS = 1e-12
+
 class AirfoilBase(ABC):
     """Abstract Base Class definition of an :py:class:`Airfoil`.
     ...
@@ -229,6 +231,13 @@ class AirfoilBase(ABC):
         return self.lower_surface.curvature_at(self.lower_crest[0])
 
     @cached_property
+    def trailing_edge(self) -> float:
+        """Returns the trailing edge ordinate of the airfoil."""
+        return 0.5 * (
+            self.upper_surface_at(1.0) + self.lower_surface_at(1.0)
+        )
+
+    @cached_property
     def trailing_edge_gap(self) -> float:
         """Returns the gap between the upper and lower surfaces at the trailing edge."""
         return np.abs(
@@ -238,22 +247,22 @@ class AirfoilBase(ABC):
     @cached_property
     def trailing_edge_upper_vector(self) -> np.ndarray:
         """Upper surface gradient at the trailing edge."""
-        return self.upper_surface.first_deriv_at(1)
+        return self.upper_surface.first_deriv_at(1 - EPS)
 
     @cached_property
     def trailing_edge_lower_vector(self) -> np.ndarray:
         """Lower surface gradient at the trailing edge."""
-        return self.lower_surface.first_deriv_at(1)
+        return self.lower_surface.first_deriv_at(1 - EPS)
 
     @cached_property
     def trailing_edge_vector(self) -> np.ndarray:
         """Vector between the upper and lower surface at the trailing edge."""
-        return self.camber_line.tangent_at(1)[0]
+        return self.camber_line.tangent_at(1 - EPS)[0]
 
     @cached_property
     def leading_edge_vector(self) -> np.ndarray:
         """Vector between the upper and lower surface at the leading edge."""
-        return self.camber_line.first_deriv_at(0)
+        return self.camber_line.first_deriv_at(0 + EPS)
 
     @cached_property
     def trailing_edge_wedge_angle(self) -> float:
