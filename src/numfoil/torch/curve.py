@@ -1558,6 +1558,391 @@ class KulfanModifiedCST(TorchCSTCurve):
         return curve
 
 
+class TorchPARSECCurve(nn.Module):
+    """Differentiable PARSEC surface parameterization (batched).
+
+    This class implements the classic PARSEC *per-surface* half-integer polynomial:
+
+    $$
+    y(x) = a_1 x^{1/2} + a_2 x + a_3 x^{3/2} + a_4 x^2 + a_5 x^{5/2} + a_6 x^3,
+    \quad x \in [0, 1]
+    $$
+
+    Nomenclature (requested):
+        - `r_le`: leading-edge radius
+        - `x_z`, `y_z`: crest ("z") location and ordinate
+        - `k_z`: crest curvature using $k := y''(x_z)$
+        - `y_te`: trailing-edge ordinate (a.k.a. `z_te` in some references)
+        - `dy_te`: trailing-edge slope $y'(1)$
+
+    Constraint system (per surface):
+        1) Leading edge radius sets the first coefficient magnitude:
+           $a_1 = s \sqrt{2 r_{le}}$ where $s=+1$ for upper and $s=-1$ for lower.
+        2) Crest point constraint: $y(x_z) = y_z$
+        3) Crest slope constraint: $y'(x_z) = 0$
+        4) Crest curvature constraint: $y''(x_z) = k_z$
+        5) Trailing edge ordinate: $y(1) = y_{te}$
+        6) Trailing edge slope: $y'(1) = dy_{te}$
+
+    Notes:
+        - Derivatives near the leading edge are singular due to $x^{-1/2}$ and
+          $x^{-3/2}$. Analytic derivative methods clamp $x$ by `eps` to avoid
+          inf/NaN.
+        - The coefficient solve uses `torch.linalg.solve` and is differentiable.
+
+    Args:
+        r_le: Leading-edge radius (scalar or [B]).
+        x_z: Crest x-location (scalar or [B]).
+        y_z: Crest ordinate (scalar or [B]).
+        k_z: Crest curvature (scalar or [B]).
+        dy_te: Trailing-edge slope (scalar or [B]).
+        y_te: Trailing-edge ordinate (scalar or [B]). Default is 0.
+        surface_type: Either "upper" or "lower".
+        device: Optional torch.device override.
+        dtype: torch.dtype for all tensors. Default is torch.float32.
+
+    Attributes:
+        r_le: Leading-edge radius tensor [B].
+        x_z: Crest x-location tensor [B].
+        y_z: Crest ordinate tensor [B].
+        k_z: Crest curvature tensor [B]. [B].
+        y_te: Trailing-edge ordinate tensor [B].
+        dy_te: Trailing-edge slope tensor [B].
+        surface_type: "upper" or "lower".
+        device: Optional torch.device override.
+        dtype: torch.dtype for all tensors. Default is torch.float32.
+        leading_edge_radius: Alias for `r_le`.
+        x_crest: Alias for `x_z`.
+        y_crest: Alias for `y_z`.
+        yxx_crest: Alias for `k_z`.
+        crest_curvature: Alias for `k_z`.
+        batch_size: Number of surfaces in batch.
+        parameters: PARSEC parameters as a single tensor [B, 6].
+    """
+
+    def __init__(
+        self,
+        r_le: Union[torch.Tensor, np.ndarray, float],
+        x_z: Union[torch.Tensor, np.ndarray, float],
+        y_z: Union[torch.Tensor, np.ndarray, float],
+        k_z: Union[torch.Tensor, np.ndarray, float],
+        dy_te: Union[torch.Tensor, np.ndarray, float],
+        y_te: Union[torch.Tensor, np.ndarray, float] = 0.0,
+        *,
+        surface_type: Literal["upper", "lower"],
+        device: Optional[torch.device | str] = None,
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
+        super().__init__()
+
+        self.device = (
+            torch.device(device)
+            if device is not None
+            else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        )
+        self.dtype = dtype
+
+        if surface_type not in ("upper", "lower"):
+            raise ValueError("surface_type must be either 'upper' or 'lower'.")
+        self.surface_type: Literal["upper", "lower"] = surface_type
+
+        # Prepare & broadcast parameters to a common batch size.
+        params = [r_le, x_z, y_z, k_z, y_te, dy_te]
+        tensors = [self._as_1d_tensor(p) for p in params]
+        batch_size = max(t.numel() for t in tensors)
+        tensors = [self._broadcast_1d(t, batch_size) for t in tensors]
+
+        r_le_t, x_z_t, y_z_t, k_z_t, y_te_t, dy_te_t = tensors
+
+        # Register parameters as buffers for state_dict inclusion.
+        self.register_buffer("r_le", r_le_t)
+        self.register_buffer("x_z", x_z_t)
+        self.register_buffer("y_z", y_z_t)
+        self.register_buffer("k_z", k_z_t)
+        self.register_buffer("y_te", y_te_t)
+        self.register_buffer("dy_te", dy_te_t)
+
+        self.eps = torch.finfo(dtype).eps
+
+        coeffs = self._compute_coefficients(
+            r_le=r_le_t,
+            x_z=x_z_t,
+            y_z=y_z_t,
+            k_z=k_z_t,
+            y_te=y_te_t,
+            dy_te=dy_te_t,
+            surface_type=surface_type,
+        )
+        self.register_buffer("coefficients", coeffs)  # [B, 6]
+
+    @property
+    def leading_edge_radius(self) -> torch.Tensor:
+        """Alias for `r_le` (compatibility with other code paths)."""
+        return self.r_le
+
+    @property
+    def x_crest(self) -> torch.Tensor:
+        """Alias for `x_z` (compatibility with earlier drafts)."""
+        return self.x_z
+
+    @property
+    def y_crest(self) -> torch.Tensor:
+        """Alias for `y_z` (compatibility with earlier drafts)."""
+        return self.y_z
+
+    @property
+    def yxx_crest(self) -> torch.Tensor:
+        """Alias for `k_z` (compatibility with earlier drafts)."""
+        return self.k_z
+
+    @property
+    def crest_curvature(self) -> torch.Tensor:
+        """Alias for `k_z` (compatibility with earlier drafts)."""
+        return self.k_z
+
+    @property
+    def batch_size(self) -> int:
+        return int(self.coefficients.shape[0])
+
+    @property
+    def parameters(self) -> torch.Tensor:
+        """Return PARSEC surface parameters as a single tensor [B, 6].
+
+        Order:
+            [ r_le, x_z, y_z, k_z, y_te, dy_te ]
+        """
+        return torch.stack(
+            [
+                self.r_le,
+                self.x_z,
+                self.y_z,
+                self.k_z,
+                self.y_te,
+                self.dy_te,
+            ],
+            dim=-1,
+        )
+
+    def _as_1d_tensor(
+        self, x: Union[torch.Tensor, np.ndarray, float]
+    ) -> torch.Tensor:
+        t = torch.as_tensor(x, dtype=self.dtype, device=self.device)
+        if t.ndim == 0:
+            return t.unsqueeze(0)
+        if t.ndim != 1:
+            raise ValueError("PARSEC parameters must be scalars or 1D tensors.")
+        return t
+
+    def _broadcast_1d(self, t: torch.Tensor, batch_size: int) -> torch.Tensor:
+        if t.numel() == 1:
+            return t.expand(batch_size)
+        if t.numel() != batch_size:
+            raise ValueError(
+                f"Batch mismatch: expected scalar or length {batch_size}, got {t.numel()}."
+            )
+        return t
+
+    def _prepare_input(self, x: Union[torch.Tensor, np.ndarray, float]) -> torch.Tensor:
+        x = (
+            x.to(dtype=self.dtype, device=self.device)
+            if torch.is_tensor(x)
+            else torch.as_tensor(x, dtype=self.dtype, device=self.device)
+        )
+        if x.ndim == 0:
+            x = x.unsqueeze(0)
+        if x.ndim != 1:
+            raise ValueError("Input x must be 1D or scalar")
+        if torch.any(x < 0) or torch.any(x > 1):
+            raise ValueError("x must be in the range [0, 1]")
+        return x
+
+    @staticmethod
+    def _basis(x: torch.Tensor) -> torch.Tensor:
+        """Return PARSEC basis matrix [X, 6]."""
+        sqrtx = torch.sqrt(x)
+        x1 = x
+        x3_2 = x * sqrtx
+        x2 = x * x
+        x5_2 = x2 * sqrtx
+        x3 = x2 * x
+        return torch.stack([sqrtx, x1, x3_2, x2, x5_2, x3], dim=-1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self._prepare_input(x)
+        basis = self._basis(x)  # [X, 6]
+        y = self.coefficients @ basis.T  # [B, X]
+        return y.squeeze(0)
+
+    def evaluate_at(self, x: torch.Tensor) -> torch.Tensor:
+        x = self._prepare_input(x)
+        y = self.forward(x)
+        if y.ndim == 1:
+            return torch.stack([x, y], dim=-1)
+        x_b = x.unsqueeze(0).expand(self.batch_size, -1)
+        return torch.stack([x_b, y], dim=-1)
+
+    def first_derivative_at(self, x: torch.Tensor, mode: str = "analytic") -> torch.Tensor:
+        if mode == "autograd":
+            x = (
+                self._prepare_input(x)
+                .clamp_min(self.eps)
+                .detach()
+                .clone()
+                .requires_grad_(True)
+            )
+            y = self.forward(x)
+            dy = torch.autograd.grad(y, x, torch.ones_like(y), create_graph=True)[0]
+            return dy
+
+        if mode != "analytic":
+            raise ValueError("mode must be 'analytic' or 'autograd'.")
+
+        x = self._prepare_input(x)
+        x_safe = x.clamp_min(self.eps)
+        sqrtx = torch.sqrt(x_safe)
+        inv_sqrtx = 1.0 / sqrtx
+        x1 = x_safe
+        x3_2 = x_safe * sqrtx
+        x2 = x_safe * x_safe
+
+        a1, a2, a3, a4, a5, a6 = self.coefficients.unbind(dim=-1)  # [B]
+        dy = (
+            0.5 * a1.unsqueeze(-1) * inv_sqrtx
+            + a2.unsqueeze(-1)
+            + 1.5 * a3.unsqueeze(-1) * sqrtx
+            + 2.0 * a4.unsqueeze(-1) * x1
+            + 2.5 * a5.unsqueeze(-1) * x3_2
+            + 3.0 * a6.unsqueeze(-1) * x2
+        )
+        return dy.squeeze(0)
+
+    def second_derivative_at(self, x: torch.Tensor, mode: str = "analytic") -> torch.Tensor:
+        if mode == "autograd":
+            x = (
+                self._prepare_input(x)
+                .clamp_min(self.eps)
+                .detach()
+                .clone()
+                .requires_grad_(True)
+            )
+            y = self.forward(x)
+            dy = torch.autograd.grad(y, x, torch.ones_like(y), create_graph=True)[0]
+            d2y = torch.autograd.grad(dy, x, torch.ones_like(dy), create_graph=True)[0]
+            return d2y
+
+        if mode != "analytic":
+            raise ValueError("mode must be 'analytic' or 'autograd'.")
+
+        x = self._prepare_input(x)
+        x_safe = x.clamp_min(self.eps)
+        sqrtx = torch.sqrt(x_safe)
+        inv_sqrtx = 1.0 / sqrtx
+        inv_x3_2 = inv_sqrtx / x_safe
+
+        a1, _, a3, a4, a5, a6 = self.coefficients.unbind(dim=-1)  # [B]
+        d2y = (
+            -0.25 * a1.unsqueeze(-1) * inv_x3_2
+            + 0.75 * a3.unsqueeze(-1) * inv_sqrtx
+            + 2.0 * a4.unsqueeze(-1)
+            + 3.75 * a5.unsqueeze(-1) * sqrtx
+            + 6.0 * a6.unsqueeze(-1) * x_safe
+        )
+        return d2y.squeeze(0)
+
+    def curvature_at(self, x: torch.Tensor, mode: str = "analytic") -> torch.Tensor:
+        dy = self.first_derivative_at(x, mode=mode)
+        d2y = self.second_derivative_at(x, mode=mode)
+        return d2y / torch.pow(1.0 + dy**2, 1.5)
+
+    def radius_at(self, x: torch.Tensor, mode: str = "analytic") -> torch.Tensor:
+        return 1.0 / (torch.abs(self.curvature_at(x, mode=mode)) + self.eps)
+
+    def tangent_at(self, x: torch.Tensor, mode: str = "analytic") -> torch.Tensor:
+        dy = self.first_derivative_at(x, mode=mode)
+        return torch.atan(dy)
+
+    def normal_at(
+        self,
+        x: torch.Tensor,
+        mode: str = "analytic",
+        direction: Literal["outward", "inward"] = "outward",
+    ) -> torch.Tensor:
+        theta = self.tangent_at(x, mode=mode)
+        if direction == "outward":
+            return theta + torch.pi / 2
+        if direction == "inward":
+            return theta - torch.pi / 2
+        raise ValueError("direction must be 'outward' or 'inward'.")
+
+    def _compute_coefficients(
+        self,
+        *,
+        r_le: torch.Tensor,
+        x_z: torch.Tensor,
+        y_z: torch.Tensor,
+        k_z: torch.Tensor,
+        y_te: torch.Tensor,
+        dy_te: torch.Tensor,
+        surface_type: Literal["upper", "lower"],
+    ) -> torch.Tensor:
+        """Solve for the PARSEC polynomial coefficients per batch element.
+
+        Unknowns: $[a_2, a_3, a_4, a_5, a_6]$.
+        The first coefficient $a_1$ is fixed by the leading-edge radius.
+        """
+        r_le = torch.abs(r_le).clamp_min(self.eps)  # [B]
+        x_z = x_z.clamp(min=self.eps, max=1.0 - self.eps)  # [B]
+
+        sign = 1.0 if surface_type == "upper" else -1.0
+        a1 = sign * torch.sqrt(2.0 * r_le)  # [B]
+
+        sqrt_xc = torch.sqrt(x_z)
+        xc = x_z
+        xc_3_2 = xc * sqrt_xc
+        xc2 = xc * xc
+        xc_5_2 = xc2 * sqrt_xc
+        xc3 = xc2 * xc
+        inv_sqrt_xc = 1.0 / sqrt_xc
+        inv_xc_3_2 = inv_sqrt_xc / xc
+
+        B = x_z.shape[0]
+        ones = torch.ones((B,), dtype=self.dtype, device=self.device)
+        zeros = torch.zeros((B,), dtype=self.dtype, device=self.device)
+
+        row1 = torch.stack([ones, ones, ones, ones, ones], dim=-1)
+        row2 = torch.stack(
+            [
+                ones,
+                1.5 * ones,
+                2.0 * ones,
+                2.5 * ones,
+                3.0 * ones,
+            ],
+            dim=-1,
+        )
+        row3 = torch.stack([xc, xc_3_2, xc2, xc_5_2, xc3], dim=-1)
+        row4 = torch.stack(
+            [ones, 1.5 * sqrt_xc, 2.0 * xc, 2.5 * xc_3_2, 3.0 * xc2],
+            dim=-1,
+        )
+        row5 = torch.stack(
+            [zeros, 0.75 * inv_sqrt_xc, 2.0 * ones, 3.75 * sqrt_xc, 6.0 * xc],
+            dim=-1,
+        )
+        A = torch.stack([row1, row2, row3, row4, row5], dim=1)  # [B, 5, 5]
+
+        b1 = y_te - a1
+        b2 = dy_te - 0.5 * a1
+        b3 = y_z - a1 * sqrt_xc
+        b4 = -0.5 * a1 * inv_sqrt_xc
+        b5 = k_z + 0.25 * a1 * inv_xc_3_2
+        b = torch.stack([b1, b2, b3, b4, b5], dim=-1)  # [B, 5]
+
+        sol = torch.linalg.solve(A, b.unsqueeze(-1)).squeeze(-1)  # [B, 5]
+        a2, a3, a4, a5, a6 = sol.unbind(dim=-1)
+        return torch.stack([a1, a2, a3, a4, a5, a6], dim=-1)
+
+
 if __name__ == "__main__":
 
     batchcoeffs = torch.randn(32, 4)  # [B=32, K=8]
