@@ -27,24 +27,59 @@ class TorchKulfanAirfoil(nn.Module):
     Parameter layout: [upper_coeffs | lower_coeffs | le_weight | te_thickness]
     """
 
+    # def __init__(
+    #     self,
+    #     upper_surface: KulfanModifiedCST,
+    #     lower_surface: KulfanModifiedCST,
+    #     device: Optional[torch.device | str] = None,
+    # ):
+    #     super().__init__()
     def __init__(
         self,
-        upper_surface: KulfanModifiedCST,
-        lower_surface: KulfanModifiedCST,
+        upper_coeffs: torch.Tensor | np.ndarray,
+        lower_coeffs: torch.Tensor | np.ndarray,
+        w_le: torch.Tensor | np.ndarray = 0.0,
+        t_te: torch.Tensor | np.ndarray = 0.0,
+        n1: float = 0.5,
+        n2: float = 1.0,
         device: Optional[torch.device | str] = None,
-    ):
+    ) -> "TorchKulfanAirfoil":
+
         super().__init__()
 
         self.device = torch.device(device) if device is not None else \
             torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+        t_te = abs(t_te)  # ensure non-negative TE thickness
+
+        self.upper_surface = KulfanModifiedCST(
+                upper_coeffs,
+                leading_edge_weight=w_le,
+                trailing_edge_thickness=t_te,
+                surface_type="upper",
+                n1=n1,
+                n2=n2,
+                device=device,
+            ).to(device=self.device)
+
+        self.lower_surface = KulfanModifiedCST(
+                lower_coeffs,
+                leading_edge_weight=w_le,
+                trailing_edge_thickness=t_te,
+                surface_type="lower",
+                n1=n1,
+                n2=n2,
+                device=device,
+            ).to(device=self.device)
+
+
         # Create base CST curves
         # self.register_buffer("upper_surface", upper_surface)
         # self.register_buffer("lower_surface", lower_surface)
-        self.upper_surface = upper_surface.to(device=self.device)
-        self.lower_surface = lower_surface.to(device=self.device)
+        # self.upper_surface = upper_surface.to(device=self.device)
+        # self.lower_surface = lower_surface.to(device=self.device)
 
-        self.eps = upper_surface.eps
+        self.eps = self.upper_surface.eps
 
         self._validate_curves()
 
@@ -77,7 +112,7 @@ class TorchKulfanAirfoil(nn.Module):
             )
 
     @classmethod
-    def from_kulfan_tensor(
+    def from_tensor(
         cls,
         parameters: torch.Tensor | np.ndarray,
         n1: float = 0.5,
@@ -139,38 +174,38 @@ class TorchKulfanAirfoil(nn.Module):
             device=device,
         )
 
-    @classmethod
-    def from_kulfan_params(
-        cls,
-        upper_coeffs: torch.Tensor | np.ndarray,
-        lower_coeffs: torch.Tensor | np.ndarray,
-        w_le: torch.Tensor | np.ndarray = 0.0,
-        t_te: torch.Tensor | np.ndarray = 0.0,
-        n1: float = 0.5,
-        n2: float = 1.0,
-        device: Optional[torch.device | str] = None,
-        ) -> "TorchKulfanAirfoil":
-        t_te = abs(t_te)  # ensure non-negative TE thickness
-        return cls(
-            KulfanModifiedCST(
-                upper_coeffs,
-                leading_edge_weight=w_le,
-                trailing_edge_thickness=t_te,
-                surface_type="upper",
-                n1=n1,
-                n2=n2,
-                device=device,
-            ),
-            KulfanModifiedCST(
-                lower_coeffs,
-                leading_edge_weight=w_le,
-                trailing_edge_thickness=t_te,
-                surface_type="lower",
-                n1=n1,
-                n2=n2,
-                device=device,
-            ),
-        )
+    # @classmethod
+    # def from_kulfan_params(
+    #     cls,
+    #     upper_coeffs: torch.Tensor | np.ndarray,
+    #     lower_coeffs: torch.Tensor | np.ndarray,
+    #     w_le: torch.Tensor | np.ndarray = 0.0,
+    #     t_te: torch.Tensor | np.ndarray = 0.0,
+    #     n1: float = 0.5,
+    #     n2: float = 1.0,
+    #     device: Optional[torch.device | str] = None,
+    #     ) -> "TorchKulfanAirfoil":
+    #     t_te = abs(t_te)  # ensure non-negative TE thickness
+    #     return cls(
+    #         KulfanModifiedCST(
+    #             upper_coeffs,
+    #             leading_edge_weight=w_le,
+    #             trailing_edge_thickness=t_te,
+    #             surface_type="upper",
+    #             n1=n1,
+    #             n2=n2,
+    #             device=device,
+    #         ),
+    #         KulfanModifiedCST(
+    #             lower_coeffs,
+    #             leading_edge_weight=w_le,
+    #             trailing_edge_thickness=t_te,
+    #             surface_type="lower",
+    #             n1=n1,
+    #             n2=n2,
+    #             device=device,
+    #         ),
+    #     )
 
     @property
     def kulfan_params(self) -> torch.Tensor:
