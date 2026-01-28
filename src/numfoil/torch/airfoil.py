@@ -52,7 +52,10 @@ class TorchKulfanAirfoil(nn.Module):
         self.device = torch.device(device) if device is not None else \
             torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        t_te = abs(t_te)  # ensure non-negative TE thickness
+        # ensure non-negative TE thickness
+        # perhaps clamp AND abs is a bit overkill, but whatever, better be sure
+        t_te = torch.clamp(t_te.abs(), min=0.0) if torch.is_tensor(t_te) else np.abs(t_te)
+
 
         self.upper_surface = KulfanModifiedCST(
                 upper_coeffs,

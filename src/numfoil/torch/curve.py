@@ -7,6 +7,8 @@ from torch.func import vmap
 from typing import Union, Tuple, Optional, Literal
 from functools import cached_property
 
+import warnings
+
 
 class TorchCSTCurve(nn.Module):
     """
@@ -983,6 +985,7 @@ class KulfanModifiedCST(TorchCSTCurve):
             trailing_edge_thickness (torch.Tensor | float):
                 Kulfan TE thickness ``t_te`` (scalar or [B]).
                 Default is 0.0, meaning no TE modification.
+                Absolute value is used to ensure non-negative thickness.
 
             surface (str):
                 Either ``"upper"`` (positive TE thickness) or ``"lower"`` (negative).
@@ -1012,8 +1015,9 @@ class KulfanModifiedCST(TorchCSTCurve):
         if self.surface_type not in ("upper", "lower"):
             raise ValueError("surface_type must be 'upper' or 'lower'.")
         if not torch.all(trailing_edge_thickness >= 0):
-            raise ValueError(
-                "Trailing edge thickness must be non-negative."
+            warnings.warn(
+                "Trailing edge thickness must be non-negative. "
+                "Absolute value will be used."
             )
 
         # Prepare LE/TE parameters so they broadcast across batch size B
@@ -1024,7 +1028,9 @@ class KulfanModifiedCST(TorchCSTCurve):
         )
         self.register_buffer(
             "trailing_edge_thickness",  # [B]
-            self._prepare_modifier_parameter(trailing_edge_thickness),
+            self._prepare_modifier_parameter(
+                torch.abs(trailing_edge_thickness)  # trailing edge thickness always non-negative
+            ),
         )
 
     def _prepare_modifier_parameter(
