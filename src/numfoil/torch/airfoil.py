@@ -51,11 +51,9 @@ class TorchKulfanAirfoil(nn.Module):
 
         self.device = torch.device(device) if device is not None else \
             torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
         # ensure non-negative TE thickness
         # perhaps clamp AND abs is a bit overkill, but whatever, better be sure
         t_te = torch.clamp(t_te.abs(), min=0.0) if torch.is_tensor(t_te) else np.abs(t_te)
-
 
         self.upper_surface = KulfanModifiedCST(
                 upper_coeffs,
@@ -172,38 +170,45 @@ class TorchKulfanAirfoil(nn.Module):
             device=device,
         )
 
-    # @classmethod
-    # def from_kulfan_params(
-    #     cls,
-    #     upper_coeffs: torch.Tensor | np.ndarray,
-    #     lower_coeffs: torch.Tensor | np.ndarray,
-    #     w_le: torch.Tensor | np.ndarray = 0.0,
-    #     t_te: torch.Tensor | np.ndarray = 0.0,
-    #     n1: float = 0.5,
-    #     n2: float = 1.0,
-    #     device: Optional[torch.device | str] = None,
-    #     ) -> "TorchKulfanAirfoil":
-    #     t_te = abs(t_te)  # ensure non-negative TE thickness
-    #     return cls(
-    #         KulfanModifiedCST(
-    #             upper_coeffs,
-    #             leading_edge_weight=w_le,
-    #             trailing_edge_thickness=t_te,
-    #             surface_type="upper",
-    #             n1=n1,
-    #             n2=n2,
-    #             device=device,
-    #         ),
-    #         KulfanModifiedCST(
-    #             lower_coeffs,
-    #             leading_edge_weight=w_le,
-    #             trailing_edge_thickness=t_te,
-    #             surface_type="lower",
-    #             n1=n1,
-    #             n2=n2,
-    #             device=device,
-    #         ),
-    #     )
+    @classmethod
+    def from_kulfan_params(
+        cls,
+        upper_coeffs: torch.Tensor | np.ndarray,
+        lower_coeffs: torch.Tensor | np.ndarray,
+        w_le: torch.Tensor | np.ndarray = 0.0,
+        t_te: torch.Tensor | np.ndarray = 0.0,
+        n1: float = 0.5,
+        n2: float = 1.0,
+        device: Optional[torch.device | str] = None,
+        ) -> "TorchKulfanAirfoil":
+        t_te = abs(t_te)  # ensure non-negative TE thickness
+        return cls(
+            upper_coeffs=upper_coeffs,
+            lower_coeffs=lower_coeffs,
+            w_le=w_le,
+            t_te=t_te,
+            device=device,
+        )
+        # return cls(
+        #     KulfanModifiedCST(
+        #         upper_coeffs,
+        #         leading_edge_weight=w_le,
+        #         trailing_edge_thickness=t_te,
+        #         surface_type="upper",
+        #         n1=n1,
+        #         n2=n2,
+        #         device=device,
+        #     ),
+        #     KulfanModifiedCST(
+        #         lower_coeffs,
+        #         leading_edge_weight=w_le,
+        #         trailing_edge_thickness=t_te,
+        #         surface_type="lower",
+        #         n1=n1,
+        #         n2=n2,
+        #         device=device,
+        #     ),
+        # )
 
     @property
     def kulfan_params(self) -> torch.Tensor:
@@ -253,7 +258,7 @@ class TorchKulfanAirfoil(nn.Module):
         """
         return self.upper_surface_at(x), self.lower_surface_at(x)
 
-    def coordinates_at(self, x: torch.Tensor) -> torch.Tensor:
+    def coordinates_at(self, x: torch.Tensor, dtype=torch.float32) -> torch.Tensor:
         """
         Get airfoil coordinates in standard counterclockwise format.
 
@@ -265,24 +270,32 @@ class TorchKulfanAirfoil(nn.Module):
         """
         y_upper, y_lower = self.forward(x)
 
-        # Standard Selig format: upper TE to LE (reversed), then lower LE to TE
-        x_full = torch.cat([x.flip(0), x[1:]])
-        y_full = torch.cat([y_upper.flip(-1), y_lower[:, 1:]], dim=-1)
+        # # Standard Selig format: upper TE to LE (reversed), then lower LE to TE
+        # x_full = torch.cat([x.flip(0), x[1:]])
+        # y_full = torch.cat([y_upper.flip(-1), y_lower[:, 1:]], dim=-1)
 
-        x_batched = x_full.unsqueeze(0).expand(self.batch_size, -1)
-        return torch.stack([x_batched, y_full], dim=-1)
+        # x = x.unsqueeze(0).expand(self.batch_size, -1)
+        # return torch.stack([x, y_full], dim=-1)
+        return torch.cat([
+            torch.stack([x, y_upper], dim=-1).flip(dims=[-2]),  # [B, 100, 2] reversed
+            torch.stack([x, y_lower], dim=-1)[..., 1:, :],      # [B, 99, 2] skip LE
+            ], dim=-2
+        ).to(dtype=dtype).squeeze() # [B>1, 199, 2]
 
     @property
-    def points(self, n_points: int = 100, dtype=torch.float32) -> torch.Tensor:
+    def points(self) -> torch.Tensor:
         """
         Get airfoil points at cosine-spaced locations in Selig format.
+        100 points per side, 199 total.
 
         Args:
             n_points: Number of chordwise points per surface.
 
         Returns:
-            Coordinates, shape [batch, 2*n_points-1, 2]
+            torch.float32: Coordinates, shape [batch, 2*n_points-1, 2]
         """
+        n_points = 100  # default number of points per surface, 199 total
+        dtype = torch.float32
         x = torch.as_tensor(
             cosine_spacing(0, 1, n_points),
             device=self.device,
