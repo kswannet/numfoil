@@ -288,11 +288,8 @@ class TorchKulfanAirfoil(nn.Module):
         Get airfoil points at cosine-spaced locations in Selig format.
         100 points per side, 199 total.
 
-        Args:
-            n_points: Number of chordwise points per surface.
-
         Returns:
-            torch.float32: Coordinates, shape [batch, 2*n_points-1, 2]
+            torch.float32: Coordinates, shape [batch, 199, 2]
         """
         n_points = 100  # default number of points per surface, 199 total
         dtype = torch.float32
