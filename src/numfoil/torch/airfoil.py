@@ -12,12 +12,9 @@ from functools import cached_property
 from ..util import cosine_spacing
 
 
-
 # TODO : make airfoil class with dependcy injection of curve types, a truly
 # generic airfoil class with CST, Bezier, etc curve support and universal fit
 # method.
-#... actually, just removed the dependency injection from kulfan airfoil again
-#for now... it makes things too complicated to use.
 
 class TorchKulfanAirfoil(nn.Module):
     """
@@ -29,21 +26,11 @@ class TorchKulfanAirfoil(nn.Module):
     Parameter layout: [upper_coeffs | lower_coeffs | le_weight | te_thickness]
     """
 
-    # def __init__(
-    #     self,
-    #     upper_surface: KulfanModifiedCST,
-    #     lower_surface: KulfanModifiedCST,
-    #     device: Optional[torch.device | str] = None,
-    # ):
-    #     super().__init__()
     def __init__(
         self,
-        upper_coeffs: torch.Tensor | np.ndarray,
-        lower_coeffs: torch.Tensor | np.ndarray,
-        w_le: torch.Tensor | np.ndarray = 0.0,
-        t_te: torch.Tensor | np.ndarray = 0.0,
-        n1: float = 0.5,
-        n2: float = 1.0,
+        upper_surface: KulfanModifiedCST,
+        lower_surface: KulfanModifiedCST,
+        name: Optional[str | list[str]] = None,
         device: Optional[torch.device | str] = None,
     ) -> "TorchKulfanAirfoil":
 
@@ -51,29 +38,14 @@ class TorchKulfanAirfoil(nn.Module):
 
         self.device = torch.device(device) if device is not None else \
             torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        # ensure non-negative TE thickness
-        # perhaps clamp AND abs is a bit overkill, but whatever, better be sure
-        t_te = torch.clamp(t_te.abs(), min=0.0) if torch.is_tensor(t_te) else np.abs(t_te)
 
-        self.upper_surface = KulfanModifiedCST(
-                upper_coeffs,
-                leading_edge_weight=w_le,
-                trailing_edge_thickness=t_te,
-                surface_type="upper",
-                n1=n1,
-                n2=n2,
-                device=device,
-            ).to(device=self.device)
+        self.upper_surface = upper_surface
+        self.lower_surface = lower_surface
+        self.name = name
 
-        self.lower_surface = KulfanModifiedCST(
-                lower_coeffs,
-                leading_edge_weight=w_le,
-                trailing_edge_thickness=t_te,
-                surface_type="lower",
-                n1=n1,
-                n2=n2,
-                device=device,
-            ).to(device=self.device)
+        # # ensure non-negative TE thickness
+        # # perhaps clamp AND abs is a bit overkill, but whatever, better be sure
+        # t_te = torch.clamp(t_te.abs(), min=0.0) if torch.is_tensor(t_te) else np.abs(t_te)
 
         self.eps = self.upper_surface.eps
 
@@ -89,22 +61,26 @@ class TorchKulfanAirfoil(nn.Module):
                 f"Upper and lower surfaces must have the same number of CST coefficients, "
                 f"got {self.upper_surface.parameters.shape} and {self.lower_surface.parameters.shape}, "
             )
+        if self.upper_surface.batch_size != self.lower_surface.batch_size:
+            raise ValueError(
+                "Upper and lower surfaces must have the same batch size, "
+                f"got {self.upper_surface.batch_size} and {self.lower_surface.batch_size}"
+            )
         if self.upper_surface.leading_edge_weight.shape != self.lower_surface.leading_edge_weight.shape:
             raise ValueError(
                 "Upper and lower surfaces must have the same leading edge weight shape, "
                 f"got {self.upper_surface.leading_edge_weight.shape} and "
                 f"{self.lower_surface.leading_edge_weight.shape}"
             )
-        if self.upper_surface.trailing_edge_thickness.shape != self.lower_surface.trailing_edge_thickness.shape:
+        if not torch.all(self.upper_surface.trailing_edge_thickness.shape == self.lower_surface.trailing_edge_thickness.shape):
             raise ValueError(
-                "Upper and lower surfaces must have the same trailing edge thickness shape, "
+                "Upper and lower surfaces must have the same trailing edge thickness defined."
                 f"got {self.upper_surface.trailing_edge_thickness.shape} and "
                 f"{self.lower_surface.trailing_edge_thickness.shape}"
             )
-        if self.upper_surface.batch_size != self.lower_surface.batch_size:
+        if self.thickness_at(torch.linspace(0, 1, 200)).min() < 0:
             raise ValueError(
-                "Upper and lower surfaces must have the same batch size, "
-                f"got {self.upper_surface.batch_size} and {self.lower_surface.batch_size}"
+                "Negative thickness detected in airfoil. Check parameters or increase tolerance."
             )
 
     @classmethod
@@ -182,33 +158,33 @@ class TorchKulfanAirfoil(nn.Module):
         device: Optional[torch.device | str] = None,
         ) -> "TorchKulfanAirfoil":
         t_te = abs(t_te)  # ensure non-negative TE thickness
-        return cls(
-            upper_coeffs=upper_coeffs,
-            lower_coeffs=lower_coeffs,
-            w_le=w_le,
-            t_te=t_te,
-            device=device,
-        )
         # return cls(
-        #     KulfanModifiedCST(
-        #         upper_coeffs,
-        #         leading_edge_weight=w_le,
-        #         trailing_edge_thickness=t_te,
-        #         surface_type="upper",
-        #         n1=n1,
-        #         n2=n2,
-        #         device=device,
-        #     ),
-        #     KulfanModifiedCST(
-        #         lower_coeffs,
-        #         leading_edge_weight=w_le,
-        #         trailing_edge_thickness=t_te,
-        #         surface_type="lower",
-        #         n1=n1,
-        #         n2=n2,
-        #         device=device,
-        #     ),
+        #     upper_coeffs=upper_coeffs,
+        #     lower_coeffs=lower_coeffs,
+        #     w_le=w_le,
+        #     t_te=t_te,
+        #     device=device,
         # )
+        return cls(
+            KulfanModifiedCST(
+                upper_coeffs,
+                leading_edge_weight=w_le,
+                trailing_edge_thickness=t_te,
+                surface_type="upper",
+                n1=n1,
+                n2=n2,
+                device=device,
+            ),
+            KulfanModifiedCST(
+                lower_coeffs,
+                leading_edge_weight=w_le,
+                trailing_edge_thickness=t_te,
+                surface_type="lower",
+                n1=n1,
+                n2=n2,
+                device=device,
+            ),
+        )
 
     @property
     def kulfan_params(self) -> torch.Tensor:
@@ -260,7 +236,7 @@ class TorchKulfanAirfoil(nn.Module):
 
     def coordinates_at(self, x: torch.Tensor, dtype=torch.float32) -> torch.Tensor:
         """
-        Get airfoil coordinates in standard counterclockwise format.
+        Get airfoil coordinates in Selig format at given chordwise locations.
 
         Args:
             x: Chordwise locations, shape (n_points,)
@@ -268,19 +244,17 @@ class TorchKulfanAirfoil(nn.Module):
         Returns:
             Coordinates, shape (batch, 2*n_points-1, 2)
         """
-        y_upper, y_lower = self.forward(x)
+        y_upper = self.upper_surface(x).to(dtype=dtype)  # [B>1, n_points]
+        y_lower = self.lower_surface(x).to(dtype=dtype)  # [B>1, n_points]
 
-        # # Standard Selig format: upper TE to LE (reversed), then lower LE to TE
-        # x_full = torch.cat([x.flip(0), x[1:]])
-        # y_full = torch.cat([y_upper.flip(-1), y_lower[:, 1:]], dim=-1)
+        if self.is_batched:
+            x = x.unsqueeze(0).expand(self.batch_size, -1)  # [B, n_points]
 
-        # x = x.unsqueeze(0).expand(self.batch_size, -1)
-        # return torch.stack([x, y_full], dim=-1)
         return torch.cat([
-            torch.stack([x, y_upper], dim=-1).flip(dims=[-2]),  # [B, 100, 2] reversed
-            torch.stack([x, y_lower], dim=-1)[..., 1:, :],      # [B, 99, 2] skip LE
+            torch.stack([x, y_upper], dim=-1).flip(dims=[-2]),  # [B, n_points, 2] reversed
+            torch.stack([x, y_lower], dim=-1)[..., 1:, :],      # [B, n_points-1, 2] skip LE
             ], dim=-2
-        ).to(dtype=dtype).squeeze() # [B>1, 199, 2]
+        ).to(dtype=dtype).squeeze() # [B>1, 2*n_points-1, 2]
 
     @property
     def points(self) -> torch.Tensor:
@@ -288,28 +262,20 @@ class TorchKulfanAirfoil(nn.Module):
         Get airfoil points at cosine-spaced locations in Selig format.
         100 points per side, 199 total.
 
+        Convenience method;
+        This is the same as `coordinates_at(cosine_spacing(0, 1, 100))`
+
         Returns:
             torch.float32: Coordinates, shape [batch, 199, 2]
         """
         n_points = 100  # default number of points per surface, 199 total
-        dtype = torch.float32
         x = torch.as_tensor(
             cosine_spacing(0, 1, n_points),
             device=self.device,
-            dtype=dtype,
+            dtype=torch.float32,
         )
 
-        upper = self.upper_surface(x).to(dtype=dtype)  # [B>1, 100]
-        lower = self.lower_surface(x).to(dtype=dtype)  # [B>1, 100]
-
-        if self.is_batched:
-            x = x.unsqueeze(0).expand(self.batch_size, -1)  # [B, 100]
-
-        return torch.cat([
-            torch.stack([x, upper], dim=-1).flip(dims=[-2]),  # [B, 100, 2] reversed
-            torch.stack([x, lower], dim=-1)[..., 1:, :],      # [B, 99, 2] skip LE
-            ], dim=-2
-        ).to(dtype=dtype).squeeze() # [B>1, 199, 2]
+        return self.coordinates_at(x, dtype=torch.float32)
 
     def upper_surface_at(self, x: torch.Tensor) -> torch.Tensor:
         """Evaluate upper surface at given x locations.
@@ -641,8 +607,6 @@ class TorchKulfanAirfoil(nn.Module):
                 linespacing=1.5,
             )
 
-
-
         if save_dir is not None:
             filepath = f"{save_dir}"
             fig.savefig(filepath, )
@@ -656,6 +620,8 @@ class TorchKulfanAirfoil(nn.Module):
         n_coefficients: int = 8,
         *,
         use_kulfan_modifiers: bool = True,
+        trailing_edge_solution: Literal["fit", "data"] = "data",
+        name: Optional[str | list[str]] = None,
         n1: float = 0.5,
         n2: float = 1.0,
         device: Optional[torch.device | str] = None,
@@ -709,12 +675,23 @@ class TorchKulfanAirfoil(nn.Module):
                 Cutoff for least squares.
             prevent_overlap (bool):
                 Enforce positive thickness.
+            trailing_edge_solution (Literal["fit", "data"]):
+                Whether to fit the trailing edge or use data-driven approach.
 
         Returns:
             TorchKulfanAirfoil: Fitted model.
 
         Raises:
             ValueError: If insufficient points or surfaces overlap.
+
+        NOTE: Solving for all parameters resulted in the trailing edge being
+        unconstraint, allowing negative values. To fix this, the trailing edge
+        thickness is first determined from the data (distance between upper and
+        lower surfaces at x=1), and then the fit is performed with this value
+        fixed, solving only for the CST coefficients and leading edge weight.
+        The alternative is just taking the absolute value of the solution for
+        t_te, but this changes the geometry slightly. Differences are small, but
+        present nonetheless.
         """
         target_device = torch.device(device) if device is not None else torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
@@ -726,6 +703,13 @@ class TorchKulfanAirfoil(nn.Module):
                 f" upper_points.shape={upper_points.shape}, "
                 f" lower_points.shape={lower_points.shape}"
             )
+
+        if trailing_edge_solution not in ("fit", "data"):
+            raise ValueError(
+                f"Invalid trailing_edge_solution: {trailing_edge_solution}. "
+                "Must be 'fit' or 'data'."
+            )
+
         # todo: this one needs work
         # if not (
         #         torch.all(  # all x in [0, 1]
@@ -799,90 +783,123 @@ class TorchKulfanAirfoil(nn.Module):
         Mx_lower = Cx_lower.unsqueeze(-1) * Bx_lower * binom  # [1, N_lower, K]
 
         if use_kulfan_modifiers:
-            # Shared LE modifier
+            # Shared LE modifier weights
             le_mod_upper = x_upper * torch.pow(1.0 - x_upper, n + 0.5)  # [N_upper]
             le_mod_lower = x_lower * torch.pow(1.0 - x_lower, n + 0.5)  # [N_lower]
 
-            # TE modifier (with sign for surface)
+            # TE modifier weights (with sign for surface)
             te_mod_upper = x_upper / 2.0  # [1, N_upper] (positive for upper)
             te_mod_lower = -x_lower / 2.0  # [1, N_lower] (negative for lower)
 
+            # If using data-driven TE solution to avoid negative solution, move
+            # known TE contribution to RHS by subtracting it from the targets
+            if trailing_edge_solution == "data":
+                # Pre-determine trailing edge thickness from data
+                te_thickness = (
+                    y_upper[..., -1] - y_lower[..., -1]
+                ).round(decimals=6).clamp_min(0.0).unsqueeze(-1)  # [B, 1]
+
+                # Known TE contribution moved to RHS, so subtract here:
+                # upper uses +x/2 * t_te, lower uses -x/2 * t_te
+                y_upper = y_upper - te_mod_upper * te_thickness
+                y_lower = y_lower - te_mod_lower * te_thickness
+
             # Zeros for the off-diagonal blocks
             # zeros_upper: [B, N_upper, K]
-            zeros_upper = torch.zeros(batch_size, x_upper.size(-1), n_coefficients, device=target_device, dtype=dtype)
+            zeros_upper = torch.zeros(
+                batch_size, x_upper.size(-1), n_coefficients, device=target_device, dtype=dtype,
+            )
             # zeros_lower: [B, N_lower, K]
-            zeros_lower = torch.zeros(batch_size, x_lower.size(-1), n_coefficients, device=target_device, dtype=dtype)
+            zeros_lower = torch.zeros(
+                batch_size, x_lower.size(-1), n_coefficients, device=target_device, dtype=dtype
+            )
 
-            # Construct the Upper Block: [Mx_upper | 0 | le_mod | te_mod]
-            # Dimensions: [B, N_upper, K + K + 1 + 1] = [B, N_upper, 2K+2]
+            # Construct the Upper Block: [Mx_upper | 0 | le_mod]
+            # Dimensions: [B, N_upper, K + K + 1] = [B, N_upper, 2K+1]
             M_upper = torch.cat(
                 [
                     Mx_upper,                     # Upper coeffs basis
                     zeros_upper,                  # Lower coeffs basis (zeros)
                     le_mod_upper.unsqueeze(-1),   # Shared LE weight basis
-                    te_mod_upper.unsqueeze(-1),   # Shared TE thickness basis
+                    # te_mod_upper.unsqueeze(-1),   # Shared TE thickness basis, moved to RHS
                 ],
                 dim=-1,
-            )  # [B, N_upper, 2K+2]
+            )  # [B, N_upper, 2K+1]
 
-            # Construct the Lower Block: [0 | Mx_lower | le_mod | te_mod]
-            # Dimensions: [B, N_lower, 2K+2]
+            # Construct the Lower Block: [0 | Mx_lower | le_mod]
+            # Dimensions: [B, N_lower, 2K+1]
             M_lower = torch.cat(
                 [
                     zeros_lower,                  # Upper coeffs basis (zeros)
                     Mx_lower,                     # Lower coeffs basis
                     le_mod_lower.unsqueeze(-1),   # Shared LE weight basis
-                    te_mod_lower.unsqueeze(-1),   # Shared TE thickness basis
+                    # te_mod_lower.unsqueeze(-1),   # Shared TE thickness basis, moved to RHS
                 ],
                 dim=-1,
-            )  # [B, N_lower, 2K+2]
+            )  # [B, N_lower, 2K+1]
+
+            # If solving for TE thickness, add TE modifier to design matrix
+            if trailing_edge_solution == "fit":
+                #
+                # [Mx_upper | 0 | le_mod | te_mod]
+                M_upper = torch.cat(
+                    [
+                        M_upper,
+                        te_mod_upper.unsqueeze(-1)  # Shared TE thickness basis
+                    ],
+                    dim=-1
+                )  # [B, N_upper, 2K+2]
+                # [Mx_lower | 0 | le_mod | te_mod]
+                M_lower = torch.cat(
+                    [
+                        M_lower,
+                        te_mod_lower.unsqueeze(-1)  # Shared TE thickness basis
+                    ],
+                    dim=-1
+                )  # [B, N_lower, 2K+2]
 
             # Combined design matrix and targets
-            M_combined = torch.cat([M_upper, M_lower], dim=1)  # [1, N_upper + N_lower, 2*K+2]
-            y_combined = torch.cat([y_upper, y_lower], dim=1).unsqueeze(-1)  # [1, N_total, 1]
+            M_combined = torch.cat([M_upper, M_lower], dim=1)  # [1, N_upper + N_lower, 2*K+1(2)]
+            y_combined = torch.cat([y_upper, y_lower], dim=1).unsqueeze(-1)  # [1, N_total, 1] adjusted for known TE contribution
 
             # Solve joint least squares
-            solution = torch.linalg.lstsq(M_combined, y_combined, rcond=rcond).solution.squeeze()  # [B>1, 2*K+2]
+            solution = torch.linalg.lstsq(M_combined, y_combined, rcond=rcond).solution.squeeze()  # [B>1, 2*K+1(2)]
 
             # Extract parameters
             upper_coeffs = solution[..., :n_coefficients]
             lower_coeffs = solution[..., n_coefficients : 2 * n_coefficients]
-            le_weight = solution[..., -2]
-            te_thickness_signed = solution[..., -1]
+
+            if trailing_edge_solution == "fit":
+                # te_thickness = torch.abs(solution[..., -1])
+                te_thickness = solution[..., -1].clamp_min(0.0)
+                # Ensure TE thickness is positive
+                le_weight = solution[..., -2]
+            else:
+                te_thickness = te_thickness.squeeze(-1)  # [B]
+                le_weight = solution[..., -1]
 
             # first coefficient on either side must be clamped
             upper_coeffs[..., 0] = torch.clamp(upper_coeffs[..., 0], min=eps)
             lower_coeffs[..., 0] = torch.clamp(lower_coeffs[..., 0], max=-eps)
 
-            # Ensure TE thickness is positive
-            te_thickness = torch.abs(te_thickness_signed)
-
-            # Infer surface types from signs
-            # upper_sign = torch.sign(upper_coeffs[0])
-            # lower_sign = torch.sign(lower_coeffs[0])
-            # te_sign = torch.sign(te_thickness_signed)
-
-            # if upper_sign != te_sign or lower_sign != -te_sign:
-            #     raise ValueError("Inconsistent surface signs in fitted solution.")
-
-            # upper_curve = KulfanModifiedCST(
-            #     coefficients=upper_coeffs,
-            #     leading_edge_weight=le_weight,
-            #     trailing_edge_thickness=te_thickness,
-            #     surface_type="upper",
-            #     n1=n1,
-            #     n2=n2,
-            #     device=target_device,
-            # )
-            # lower_curve = KulfanModifiedCST(
-            #     coefficients=lower_coeffs,
-            #     leading_edge_weight=le_weight,
-            #     trailing_edge_thickness=te_thickness,
-            #     surface_type="lower",
-            #     n1=n1,
-            #     n2=n2,
-            #     device=target_device,
-            # )
+            upper_curve = KulfanModifiedCST(
+                coefficients=upper_coeffs,
+                leading_edge_weight=le_weight,
+                trailing_edge_thickness=te_thickness,
+                surface_type="upper",
+                n1=n1,
+                n2=n2,
+                device=target_device,
+            )
+            lower_curve = KulfanModifiedCST(
+                coefficients=lower_coeffs,
+                leading_edge_weight=le_weight,
+                trailing_edge_thickness=te_thickness,
+                surface_type="lower",
+                n1=n1,
+                n2=n2,
+                device=target_device,
+            )
         else:
             # Plain CST: no shared modifiers
             M_combined = torch.cat([Mx_upper, Mx_lower], dim=0)
@@ -893,60 +910,116 @@ class TorchKulfanAirfoil(nn.Module):
             le_weight = torch.tensor(0.0, device=target_device, dtype=dtype)
             te_thickness = torch.tensor(0.0, device=target_device, dtype=dtype)
 
-            # upper_curve = TorchCSTCurve(upper_coeffs, n1=n1, n2=n2, device=target_device)
-            # lower_curve = TorchCSTCurve(lower_coeffs, n1=n1, n2=n2, device=target_device)
+            upper_curve = TorchCSTCurve(upper_coeffs, n1=n1, n2=n2, device=target_device)
+            lower_curve = TorchCSTCurve(lower_coeffs, n1=n1, n2=n2, device=target_device)
 
-        # airfoil = cls(
-        #     upper_surface=upper_curve,
-        #     lower_surface=lower_curve,
-        #     device=target_device,
-        #     # allow_overlap=not prevent_overlap,
-        # )
-        # # if prevent_overlap:
-        # #     airfoil._enforce_positive_thickness()
-        # return airfoil
-        return cls(
-            upper_coeffs=upper_coeffs,
-            lower_coeffs=lower_coeffs,
-            w_le=le_weight,
-            t_te=te_thickness,
+        airfoil = cls(
+            upper_surface=upper_curve,
+            lower_surface=lower_curve,
             device=target_device,
+            name=name,
+            # allow_overlap=not prevent_overlap,
         )
+        # if prevent_overlap:
+        #     airfoil._enforce_positive_thickness()
+        return airfoil
 
     # !!! Untested !!!
-    def _enforce_positive_thickness(self, max_iterations: int = 8) -> None:
-        """Apply minimal vertical offsets to eliminate overlaps.
-        Corrective method that iteratively adjusts upper and lower surfaces
-        to ensure positive thickness along the chord.
+    def _force_positive_thickness(
+        self,
+        min_thickness: float = 0.0,
+        n_points: int = 512,
+        max_iterations: int = 10,
+        locality_sigma: float = 0.02,
+        safety_margin: float = 1e-6,
+        trailing_edge_solution: Literal["fit", "data"] = "data",
+    ) -> None:
+        """Locally repair surface intersections by symmetric, minimal deformation.
 
-        Note that this modifies the original airfoil!
+        This method samples the current airfoil on a cosine-spaced chord grid,
+        detects the most negative-thickness locations, applies local Gaussian
+        separation bumps (upper +delta/2, lower -delta/2), and refits Kulfan
+        parameters to the repaired point clouds.
 
         Args:
-            max_iterations (int): Maximum adjustment passes.
+            min_thickness (float): Required lower bound on thickness.
+            n_points (int): Number of chordwise sample points.
+            max_iterations (int): Max local correction passes in point-space.
+            locality_sigma (float): Gaussian width in chord fraction.
+            safety_margin (float): Extra margin to avoid numerical equality.
+            trailing_edge_solution (Literal["fit", "data"]): TE handling for refit.
 
-        Raises:
-            ValueError: If positive thickness cannot be achieved.
+        Returns:
+            None. Updates this instance in-place.
+
+        Notes:
+            - Locality is enforced by Gaussian bumps centered at worst overlap.
+            - Bumps are multiplied by x(1-x) to avoid perturbing LE/TE endpoints.
+            - Refit is performed once after point-space repair.
         """
-        raise NotImplementedError(
-            "This method is untested and may not work as intended."
-        )
-        if self.allow_overlap:
-            return
+        if min_thickness < 0:
+            raise ValueError("min_thickness must be >= 0.")
 
-        beta = torch.linspace(0.0, torch.pi, 512, device=self.device)
-        x = 0.5 * (1.0 - torch.cos(beta))
+        dtype = self.upper_surface.coefficients.dtype
+        eps = torch.finfo(dtype).eps
+
+        beta = torch.linspace(0.0, torch.pi, n_points, device=self.device, dtype=dtype)
+        x = 0.5 * (1.0 - torch.cos(beta))  # cosine spacing in [0, 1]
+
+        y_u, y_l = self.forward(x)
+        if y_u.ndim == 1:
+            y_u = y_u.unsqueeze(0)
+            y_l = y_l.unsqueeze(0)
+
+        y_u_adj = y_u.clone()
+        y_l_adj = y_l.clone()
+
+        envelope = (x * (1.0 - x)).clamp_min(0.0)  # preserve LE/TE points
 
         for _ in range(max_iterations):
-            thickness = self.thickness(x)
-            min_gap = thickness.min(dim=-1).values
-            if torch.all(min_gap > self.overlap_tolerance):
-                return
-            correction = (self.overlap_tolerance - min_gap).clamp_min(0.0).unsqueeze(-1)
-            self.upper_offset += 0.5 * correction
-            self.lower_offset -= 0.5 * correction
+            t = y_u_adj - y_l_adj  # [B, N]
+            t_min, idx_min = torch.min(t, dim=-1)  # [B], [B]
+            needs_fix = t_min < min_thickness
 
-        if torch.any(self.thickness(x) <= 0):
-            raise ValueError("Unable to eliminate overlap while preserving curve shapes.")
+            if not torch.any(needs_fix):
+                break
+
+            bad_rows = torch.where(needs_fix)[0]
+            for b in bad_rows.tolist():
+                x0 = x[idx_min[b]]
+                deficit = (min_thickness - t_min[b] + safety_margin).clamp_min(0.0)
+
+                bump = torch.exp(-0.5 * ((x - x0) / locality_sigma) ** 2)
+                bump = bump * envelope
+                bump = bump / (bump.max() + eps)
+
+                delta = 0.5 * deficit * bump
+                y_u_adj[b] = y_u_adj[b] + delta
+                y_l_adj[b] = y_l_adj[b] - delta
+        else:
+            raise ValueError(
+                "Unable to enforce positive thickness within max_iterations."
+            )
+
+        x_b = x.unsqueeze(0).expand(y_u_adj.shape[0], -1)
+        upper_points = torch.stack([x_b, y_u_adj], dim=-1)
+        lower_points = torch.stack([x_b, y_l_adj], dim=-1)
+
+        repaired = type(self).fit(
+            upper_points=upper_points,
+            lower_points=lower_points,
+            n_coefficients=self.upper_surface.coefficients.shape[-1],
+            use_kulfan_modifiers=True,
+            trailing_edge_solution=trailing_edge_solution,
+            name=self.name,
+            n1=float(getattr(self.upper_surface, "n1", 0.5)),
+            n2=float(getattr(self.upper_surface, "n2", 1.0)),
+            device=self.device,
+            repair_negative_thickness=False,
+        )
+
+        self.upper_surface = repaired.upper_surface
+        self.lower_surface = repaired.lower_surface
 
 
 class TorchPARSECAirfoil(nn.Module):
