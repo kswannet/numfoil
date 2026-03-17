@@ -921,6 +921,12 @@ class TorchCSTCurve(nn.Module):
         curve._fitted_points = points.detach().clone()  # shape [B, N, 2]
         return curve
 
+# todo: the handling of upper vs lower surface is a bit clunky.
+# but idk how else to do this.
+
+# TODO: there is also still the question of output dimension.
+# Always return a 2D tensor (shape [B, X] even if B=1)
+# or always squeeze (shape [X] if B=1) so single curves are 1D tensors?
 
 class KulfanModifiedCST(TorchCSTCurve):
     """Airfoil specific CST curve with Kulfan leading- and trailing-edge
@@ -951,6 +957,7 @@ class KulfanModifiedCST(TorchCSTCurve):
 
         trailing_edge_thickness (torch.Tensor):
             Kulfan trailing-edge thickness ``t_te`` of shape [B].
+            Always non-negative.
 
         surface_type (str):
             Either ``"upper"`` or ``"lower"``, determined from leading-edge
@@ -1009,11 +1016,20 @@ class KulfanModifiedCST(TorchCSTCurve):
         super().__init__(coefficients, n1=n1, n2=n2, device=device)
 
         # Determine surface type
-        self.surface_type = surface_type or self.infer_surface_type()
+        self.surface_type = surface_type.lower() or self.infer_surface_type()
 
         # little validation
         if self.surface_type not in ("upper", "lower"):
             raise ValueError("surface_type must be 'upper' or 'lower'.")
+
+        # I'm not sure about this way of inferring, but for now it seems to work
+        if not self.surface_type == self.infer_surface_type():
+            raise ValueError(
+                "Inconsistent surface type: provided surface_type "
+                f"'{self.surface_type}' does not match inferred type (based on leading-edge slope) "
+                f"'{self.infer_surface_type()}'."
+            )
+
         if not torch.all(trailing_edge_thickness >= 0):
             warnings.warn(
                 "Trailing edge thickness must be non-negative. "
@@ -1032,6 +1048,33 @@ class KulfanModifiedCST(TorchCSTCurve):
                 torch.abs(trailing_edge_thickness)  # trailing edge thickness always non-negative
             ),
         )
+
+    # def _validate(self):
+    #     if self.surface_type not in ("upper", "lower"):
+    #         raise ValueError("surface_type must be 'upper' or 'lower'.")
+
+    def infer_surface_type(self) -> str:
+        """Determine if the curve represents an upper or lower airfoil surface.
+
+        Based on the sign of the first coefficient (leading-edge slope) of the shape function:
+            - Positive coefficient indicates upper surface.
+            - Negative coefficient indicates lower surface.
+
+        Returns:
+            str: "upper" if TE thickness is positive, "lower" if negative.
+
+        Raises:
+            ValueError: If mixed surface types are detected in batch.
+        """
+        if torch.all(torch.sign(self.coefficients[..., 0]) > 0):
+            return "upper"
+        elif torch.all(torch.sign(self.coefficients[..., 0]) < 0):
+            return "lower"
+        else:
+            raise ValueError(
+                "Inconsistent signs of leading-edge slope and first coefficient. "
+                "Potentially mixed upper/lower surfaces in batch."
+            )
 
     def _prepare_modifier_parameter(
         self,
@@ -1060,40 +1103,14 @@ class KulfanModifiedCST(TorchCSTCurve):
         # single value: expand to batch size
         if x.ndim == 0 or (x.ndim == 1 and x.shape[0] == 1):
             x = x.expand(self.batch_size)       # [B]
-        # 1D tensor: validate shape
+        if x.ndim == 1:
+            x = x.unsqueeze(-1)  # [B, 1]
         if x.shape[0] != self.batch_size:
             raise ValueError(
                 f"Dimension mismatch: batch size is {self.batch_size}, "
                 f"but LE or TE modifier has shape {tuple(x.shape)} instead."
             )
-        return x.unsqueeze(-1)
-
-    def infer_surface_type(self) -> str:
-        """Determine if the curve represents an upper or lower airfoil surface.
-
-        Based on the sign of the leading-edge slope at x=0:
-            - Positive slope indicates upper surface.
-            - Negative slope indicates lower surface.
-
-        Slope is the first derivative of the *unmodified* CST curve,
-        and signs are cross-checked with the first coefficient and y-component
-        of the tangent vector.
-
-        Returns:
-            str: "upper" if TE thickness is positive, "lower" if negative.
-
-        Raises:
-            ValueError: If mixed surface types are detected in batch.
-        """
-        if torch.all(torch.sign(self.coefficients[..., 0]) > 0):
-            return "upper"
-        elif torch.all(torch.sign(self.coefficients[..., 0]) < 0):
-            return "lower"
-        else:
-            raise ValueError(
-                "Inconsistent signs of leading-edge slope and first coefficient. "
-                "Potentially mixed upper/lower surfaces in batch."
-            )
+        return x
 
     @property
     def parameters(self) -> torch.Tensor:
@@ -1120,7 +1137,20 @@ class KulfanModifiedCST(TorchCSTCurve):
             torch.Tensor: Shape [B, 1]
                 Values +1.0 for upper surface, -1.0 for lower surface.
         """
-        return torch.sign(self.coefficients[:, 0]).unsqueeze(-1)  # [B, 1]
+        # return torch.sign(self.coefficients[:, 0]).unsqueeze(-1)  # [B, 1]  the old way
+        match self.surface_type:
+            case "upper": return torch.sign(torch.as_tensor(1.0))
+            case "lower": return torch.sign(torch.as_tensor(-1.0))
+            case _: raise ValueError(
+                f"Invalid surface type '{self.surface_type}' for determining TE sign."
+            )
+        # # this is maybe a bit better... but too much code
+        # case "upper":
+        #     return torch.ones((self.batch_size, 1), device=self.coefficients.device, dtype=self.coefficients.dtype)
+        # case "lower":
+        #     return -torch.ones((self.batch_size, 1), device=self.coefficients.device, dtype=self.coefficients.dtype)
+        # case _:
+        #     raise ValueError(f"Invalid surface type '{self.surface_type}' for determining TE sign.")
 
     def leading_edge_mod(self, x: torch.Tensor) -> torch.Tensor:
         """
