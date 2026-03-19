@@ -9,6 +9,9 @@ from .parameterization import PARSEC #, KulfanCST
 from typing import Optional, Tuple, Literal
 from functools import cached_property
 
+import matplotlib.pyplot as plt
+
+
 from ..util import cosine_spacing
 
 
@@ -72,7 +75,10 @@ class TorchKulfanAirfoil(nn.Module):
                 f"got {self.upper_surface.leading_edge_weight.shape} and "
                 f"{self.lower_surface.leading_edge_weight.shape}"
             )
-        if not torch.all(self.upper_surface.trailing_edge_thickness.shape == self.lower_surface.trailing_edge_thickness.shape):
+        if (
+            self.upper_surface.trailing_edge_thickness.shape
+            != self.lower_surface.trailing_edge_thickness.shape
+        ):
             raise ValueError(
                 "Upper and lower surfaces must have the same trailing edge thickness defined."
                 f"got {self.upper_surface.trailing_edge_thickness.shape} and "
@@ -544,8 +550,6 @@ class TorchKulfanAirfoil(nn.Module):
         Returns:
             Tuple[plt.Figure, plt.Axes]
         """
-        import matplotlib.pyplot as plt
-
         x = torch.linspace(0, 1, 2000, device=self.device)
         y_upper, y_lower = self.forward(x)
 
