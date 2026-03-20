@@ -1,9 +1,11 @@
 import torch
 import torch.nn as nn
 import numpy as np
+import warnings
 
 from .curve import TorchCSTCurve, KulfanModifiedCST, TorchPARSECCurve
 from ..data import datafile, normalization
+from ..data.repair import repair_negative_thickness_points
 from .parameterization import PARSEC #, KulfanCST
 
 from typing import Optional, Tuple, Literal
@@ -193,17 +195,17 @@ class TorchKulfanAirfoil(nn.Module):
         )
 
     @property
-    def kulfan_params(self) -> torch.Tensor:
+    def params(self) -> torch.Tensor:
         """Get Kulfan parameters as a single tensor.
 
         Returns:
-        torch.Tensor, shape [batch, 2*n_coeffs + 2]
+            torch.Tensor, shape [batch, 2*n_coeffs + 2]
         """
         return torch.cat([
-            self.upper_surface.coefficients,            # [B, n_coeffs]
-            self.lower_surface.coefficients,            # [B, n_coeffs]
-            self.upper_surface.leading_edge_weight,     # [B, 1]
-            self.upper_surface.trailing_edge_thickness, # [B, 1]
+            self.upper_surface.coefficients,             # [B, n_coeffs]
+            self.lower_surface.coefficients,             # [B, n_coeffs]
+            self.upper_surface.leading_edge_weight,      # [B, 1]
+            self.upper_surface.trailing_edge_thickness,  # [B, 1]
         ], dim=-1).squeeze()
 
     @property
@@ -222,7 +224,7 @@ class TorchKulfanAirfoil(nn.Module):
 
     @property
     def shape(self) -> Tuple[int, int]:
-        return self.kulfan_params.shape
+        return self.params.shape
 
     @property
     def __len__(self) -> int:
@@ -630,6 +632,7 @@ class TorchKulfanAirfoil(nn.Module):
         n2: float = 1.0,
         device: Optional[torch.device | str] = None,
         rcond: Optional[float] = None,
+        repair_negative_thickness: bool = False,
     ) -> "TorchKulfanAirfoil":
         """Jointly fit upper and lower surfaces to Selig-format coordinates with
         shared Kulfan modifiers for leading and trailing edge.
@@ -677,10 +680,12 @@ class TorchKulfanAirfoil(nn.Module):
                 Target device.
             rcond (float, optional):
                 Cutoff for least squares.
-            prevent_overlap (bool):
-                Enforce positive thickness.
             trailing_edge_solution (Literal["fit", "data"]):
                 Whether to fit the trailing edge or use data-driven approach.
+            repair_negative_thickness (bool):
+                If True, automatically applies an experimental local repair to
+                input point clouds when the fitted geometry has negative
+                thickness, then retries fit once.
 
         Returns:
             TorchKulfanAirfoil: Fitted model.
@@ -844,7 +849,6 @@ class TorchKulfanAirfoil(nn.Module):
 
             # If solving for TE thickness, add TE modifier to design matrix
             if trailing_edge_solution == "fit":
-                #
                 # [Mx_upper | 0 | le_mod | te_mod]
                 M_upper = torch.cat(
                     [
@@ -917,16 +921,42 @@ class TorchKulfanAirfoil(nn.Module):
             upper_curve = TorchCSTCurve(upper_coeffs, n1=n1, n2=n2, device=target_device)
             lower_curve = TorchCSTCurve(lower_coeffs, n1=n1, n2=n2, device=target_device)
 
-        airfoil = cls(
-            upper_surface=upper_curve,
-            lower_surface=lower_curve,
-            device=target_device,
-            name=name,
-            # allow_overlap=not prevent_overlap,
-        )
-        # if prevent_overlap:
-        #     airfoil._enforce_positive_thickness()
-        return airfoil
+        try:
+            airfoil = cls(
+                upper_surface=upper_curve,
+                lower_surface=lower_curve,
+                device=target_device,
+                name=name,
+            )
+            return airfoil
+        except ValueError as exc:
+            if (not repair_negative_thickness) or (
+                "Negative thickness detected" not in str(exc)
+            ):
+                raise
+
+            warnings.warn(
+                "TorchKulfanAirfoil.fit detected negative thickness; applying "
+                "experimental local repair and retrying fit once.",
+                RuntimeWarning,
+            )
+            repaired_upper, repaired_lower = repair_negative_thickness_points(
+                upper_points=upper_points,
+                lower_points=lower_points,
+            )
+            return cls.fit(
+                upper_points=repaired_upper,
+                lower_points=repaired_lower,
+                n_coefficients=n_coefficients,
+                use_kulfan_modifiers=use_kulfan_modifiers,
+                trailing_edge_solution=trailing_edge_solution,
+                name=name,
+                n1=n1,
+                n2=n2,
+                device=target_device,
+                rcond=rcond,
+                repair_negative_thickness=False,
+            )
 
     # !!! Untested !!!
     def _force_positive_thickness(
@@ -965,7 +995,6 @@ class TorchKulfanAirfoil(nn.Module):
             raise ValueError("min_thickness must be >= 0.")
 
         dtype = self.upper_surface.coefficients.dtype
-        eps = torch.finfo(dtype).eps
 
         beta = torch.linspace(0.0, torch.pi, n_points, device=self.device, dtype=dtype)
         x = 0.5 * (1.0 - torch.cos(beta))  # cosine spacing in [0, 1]
@@ -975,39 +1004,17 @@ class TorchKulfanAirfoil(nn.Module):
             y_u = y_u.unsqueeze(0)
             y_l = y_l.unsqueeze(0)
 
-        y_u_adj = y_u.clone()
-        y_l_adj = y_l.clone()
-
-        envelope = (x * (1.0 - x)).clamp_min(0.0)  # preserve LE/TE points
-
-        for _ in range(max_iterations):
-            t = y_u_adj - y_l_adj  # [B, N]
-            t_min, idx_min = torch.min(t, dim=-1)  # [B], [B]
-            needs_fix = t_min < min_thickness
-
-            if not torch.any(needs_fix):
-                break
-
-            bad_rows = torch.where(needs_fix)[0]
-            for b in bad_rows.tolist():
-                x0 = x[idx_min[b]]
-                deficit = (min_thickness - t_min[b] + safety_margin).clamp_min(0.0)
-
-                bump = torch.exp(-0.5 * ((x - x0) / locality_sigma) ** 2)
-                bump = bump * envelope
-                bump = bump / (bump.max() + eps)
-
-                delta = 0.5 * deficit * bump
-                y_u_adj[b] = y_u_adj[b] + delta
-                y_l_adj[b] = y_l_adj[b] - delta
-        else:
-            raise ValueError(
-                "Unable to enforce positive thickness within max_iterations."
-            )
-
-        x_b = x.unsqueeze(0).expand(y_u_adj.shape[0], -1)
-        upper_points = torch.stack([x_b, y_u_adj], dim=-1)
-        lower_points = torch.stack([x_b, y_l_adj], dim=-1)
+        x_b = x.unsqueeze(0).expand(y_u.shape[0], -1)
+        upper_points = torch.stack([x_b, y_u], dim=-1)
+        lower_points = torch.stack([x_b, y_l], dim=-1)
+        upper_points, lower_points = repair_negative_thickness_points(
+            upper_points=upper_points,
+            lower_points=lower_points,
+            min_thickness=min_thickness,
+            max_iterations=max_iterations,
+            locality_sigma=locality_sigma,
+            safety_margin=safety_margin,
+        )
 
         repaired = type(self).fit(
             upper_points=upper_points,
