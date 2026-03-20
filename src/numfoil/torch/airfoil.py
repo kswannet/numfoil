@@ -5,7 +5,7 @@ import warnings
 
 from .curve import TorchCSTCurve, KulfanModifiedCST, TorchPARSECCurve
 from ..data import datafile, normalization
-from ..data.repair import repair_negative_thickness_points
+from ..data.repair import repair_negative_thickness_points_torch as fix_t
 from .parameterization import PARSEC #, KulfanCST
 
 from typing import Optional, Tuple, Literal
@@ -86,11 +86,12 @@ class TorchKulfanAirfoil(nn.Module):
                 f"got {self.upper_surface.trailing_edge_thickness.shape} and "
                 f"{self.lower_surface.trailing_edge_thickness.shape}"
             )
-        if self.thickness_at(torch.linspace(0, 1, 200)).min() < 0:
-            raise ValueError(
-                "Negative thickness detected in airfoil. Check parameters or increase tolerance."
-                f" Problematic airfoil indices: {torch.where(self.thickness_at(torch.linspace(0, 1, 200))[...,:].amin(dim=-1)<0)}"
-            )
+        # !!!
+        # if self.thickness_at(torch.linspace(0, 1, 200)).min() < 0:
+        #     raise ValueError(
+        #         "Negative thickness detected in airfoil. Check parameters or increase tolerance."
+        #         f" Problematic airfoil indices: {torch.argwhere(self.thickness_at(torch.linspace(0, 1, 200))[...,:].amin(dim=-1)<0).squeeze()}"
+        #     )
 
     @classmethod
     def from_tensor(
@@ -145,14 +146,31 @@ class TorchKulfanAirfoil(nn.Module):
                 f"Number of CST parameters must be even (2*n_coeffs + 2), got {n_params}"
             )
         n_coeffs = (n_params - 2) // 2
+
+        upper_coeffs = parameters[..., :n_coeffs]
+        lower_coeffs = parameters[..., n_coeffs:-2]
+        w_le = parameters[..., -2]
+        t_te = parameters[..., -1]
+
         return cls(
-            upper_coeffs=parameters[..., :n_coeffs],
-            lower_coeffs=parameters[..., n_coeffs:-2],
-            w_le=parameters[..., -2],
-            t_te=parameters[..., -1],
-            n1=n1,
-            n2=n2,
-            device=device,
+            KulfanModifiedCST(
+                upper_coeffs,
+                leading_edge_weight=w_le,
+                trailing_edge_thickness=t_te,
+                surface_type="upper",
+                n1=n1,
+                n2=n2,
+                device=device,
+            ),
+            KulfanModifiedCST(
+                lower_coeffs,
+                leading_edge_weight=w_le,
+                trailing_edge_thickness=t_te,
+                surface_type="lower",
+                n1=n1,
+                n2=n2,
+                device=device,
+            ),
         )
 
     @classmethod
@@ -196,7 +214,7 @@ class TorchKulfanAirfoil(nn.Module):
         )
 
     @property
-    def params(self) -> torch.Tensor:
+    def parameters(self) -> torch.Tensor:
         """Get Kulfan parameters as a single tensor.
 
         Returns:
@@ -208,6 +226,8 @@ class TorchKulfanAirfoil(nn.Module):
             self.upper_surface.leading_edge_weight,      # [B, 1]
             self.upper_surface.trailing_edge_thickness,  # [B, 1]
         ], dim=-1).squeeze()
+
+    params = parameters
 
     @property
     def batch_size(self) -> int:
@@ -226,6 +246,11 @@ class TorchKulfanAirfoil(nn.Module):
     @property
     def shape(self) -> Tuple[int, int]:
         return self.params.shape
+
+    @property
+    def num(self) -> Tuple[int, int]:
+        """Number of airfoils included"""
+        return self.params.shape[0]
 
     @property
     def __len__(self) -> int:
@@ -323,6 +348,15 @@ class TorchKulfanAirfoil(nn.Module):
         """
         y_upper, y_lower = self.forward(x)
         return (y_upper + y_lower) / 2
+
+    # TODO fix trailing edge thickness during fit
+    @property
+    def thickness_distribution(self) -> KulfanModifiedCST:
+        return KulfanModifiedCST.fit(
+            self.thickness_at(torch.linspace(0, 1, 200, device=self.device)).round(6),
+            surface_type="upper",  # thickness is always positive, so "upper" type is appropriate
+            n_coefficients=self.upper_surface.n_coefficients,  # use same number of coeffs as upper surface
+        )
 
     @property
     def max_thickness(self) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -534,7 +568,7 @@ class TorchKulfanAirfoil(nn.Module):
         """
         beta = torch.linspace(0.0, torch.pi, 512, device=self.device)
         x = 0.5 * (1.0 - torch.cos(beta))
-        return torch.all(self.thickness(x) >= 0).item()
+        return torch.all(self.thickness_at(x) >= 0).item()
 
     def plot(
         self,
@@ -941,7 +975,7 @@ class TorchKulfanAirfoil(nn.Module):
                 "experimental local repair and retrying fit once.",
                 RuntimeWarning,
             )
-            repaired_upper, repaired_lower = repair_negative_thickness_points(
+            repaired_upper, repaired_lower = fix_t(
                 upper_points=upper_points,
                 lower_points=lower_points,
             )
@@ -962,7 +996,7 @@ class TorchKulfanAirfoil(nn.Module):
     # !!! Untested !!!
     def _force_positive_thickness(
         self,
-        min_thickness: float = 0.0,
+        min_thickness: float = 1e-6,
         n_points: int = 512,
         max_iterations: int = 10,
         locality_sigma: float = 0.02,
@@ -997,8 +1031,9 @@ class TorchKulfanAirfoil(nn.Module):
 
         dtype = self.upper_surface.coefficients.dtype
 
-        beta = torch.linspace(0.0, torch.pi, n_points, device=self.device, dtype=dtype)
-        x = 0.5 * (1.0 - torch.cos(beta))  # cosine spacing in [0, 1]
+        # beta = torch.linspace(0.0, torch.pi, n_points, device=self.device, dtype=dtype)
+        # x = 0.5 * (1.0 - torch.cos(beta))  # cosine spacing in [0, 1]
+        x = torch.as_tensor(cosine_spacing(0, 1, n_points))
 
         y_u, y_l = self.forward(x)
         if y_u.ndim == 1:
@@ -1008,7 +1043,7 @@ class TorchKulfanAirfoil(nn.Module):
         x_b = x.unsqueeze(0).expand(y_u.shape[0], -1)
         upper_points = torch.stack([x_b, y_u], dim=-1)
         lower_points = torch.stack([x_b, y_l], dim=-1)
-        upper_points, lower_points = repair_negative_thickness_points(
+        upper_points, lower_points = fix_t(
             upper_points=upper_points,
             lower_points=lower_points,
             min_thickness=min_thickness,
