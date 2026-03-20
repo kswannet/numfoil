@@ -48,17 +48,16 @@ class Geom2D(np.ndarray):
     @property
     def x(self) -> np.ndarray:
         """Returns the x coordinate(s) of :py:class:`Point2D`."""
-        return np.atleast_1d(
-            self[..., 0].view(np.ndarray)
-        )
-
+        # return self[..., 0].view(np.ndarray)
+        x = self[..., 0].view(np.ndarray)
+        return x if x.size > 1 else x.item()
 
     @property
     def y(self) -> np.ndarray:
         """Returns the y coordinate(s) of :py:class:`Point2D`."""
-        return np.atleast_1d(
-            self[..., 1].view(np.ndarray)
-        )
+        # return self[..., 1].view(np.ndarray)
+        y = self[..., 1].view(np.ndarray)
+        return y if y.ndim > 0 else y.item()
 
 
 class Point2D(Geom2D):
