@@ -87,6 +87,7 @@ class TorchKulfanAirfoil(nn.Module):
         if self.thickness_at(torch.linspace(0, 1, 200)).min() < 0:
             raise ValueError(
                 "Negative thickness detected in airfoil. Check parameters or increase tolerance."
+                f" Problematic airfoil indices: {torch.where(self.thickness_at(torch.linspace(0, 1, 200))[...,:].amin(dim=-1)<0)}"
             )
 
     @classmethod
