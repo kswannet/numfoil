@@ -1000,7 +1000,6 @@ class TorchKulfanAirfoil(nn.Module):
         n_points: int = 512,
         max_iterations: int = 10,
         locality_sigma: float = 0.02,
-        safety_margin: float = 1e-6,
         trailing_edge_solution: Literal["fit", "data"] = "data",
     ) -> None:
         """Locally repair surface intersections by symmetric, minimal deformation.
@@ -1015,7 +1014,6 @@ class TorchKulfanAirfoil(nn.Module):
             n_points (int): Number of chordwise sample points.
             max_iterations (int): Max local correction passes in point-space.
             locality_sigma (float): Gaussian width in chord fraction.
-            safety_margin (float): Extra margin to avoid numerical equality.
             trailing_edge_solution (Literal["fit", "data"]): TE handling for refit.
 
         Returns:
@@ -1049,7 +1047,7 @@ class TorchKulfanAirfoil(nn.Module):
             min_thickness=min_thickness,
             max_iterations=max_iterations,
             locality_sigma=locality_sigma,
-            safety_margin=safety_margin,
+            weighting="edge_anchored",
         )
 
         repaired = type(self).fit(

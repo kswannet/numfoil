@@ -7,5 +7,5 @@ __all__ = [
     "AirfoilDataFile",
     "AirfoilNormalizer",
     "repair_negative_thickness_points",
-    "repair_negative_thickness_points_numpy",
+    "repair_negative_thickness_points_torch",
 ]

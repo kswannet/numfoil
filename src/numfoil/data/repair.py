@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 
@@ -13,99 +13,139 @@ if TYPE_CHECKING:
     import torch as _torch
 
 
+WeightingMode = Literal["symmetric", "edge_anchored"]
+
+# TODO symmetric one does not work !!!
 def repair_negative_thickness_points(
     upper_points: np.ndarray,
     lower_points: np.ndarray,
     min_thickness: float = 0.0,
     max_iterations: int = 10,
     locality_sigma: float = 0.02,
-    safety_margin: float = 1e-6,
+    weighting: WeightingMode = "edge_anchored",
+    edge_power: float = 2.0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Repair negative local thickness for point clouds using vectorized NumPy updates.
+    """Repair negative thickness with one centered correction (NumPy).
 
-    This routine accepts arbitrary leading dimensions and interprets the last two
-    axes as `[N, 2]` point clouds (x,y). It iteratively applies a local Gaussian
-    bump around the most critical x-location of each sample until all samples
-    satisfy `thickness >= min_thickness` or `max_iterations` is reached.
+    For each sample, this function finds the minimum-thickness point exactly
+    once, computes the required opening there, and applies a single symmetric
+    correction field across the full chord. This avoids stacked local updates.
+
+    This routine is rank-agnostic over leading dimensions: any input with shape
+    ``[..., N, 2]`` is accepted and processed by flattening leading dims into a
+    sample axis and reshaping back after repair.
 
     Args:
-        upper_points (np.ndarray): Upper surface points, shape `[..., N, 2]`.
-        lower_points (np.ndarray): Lower surface points, shape `[..., N, 2]`.
-        min_thickness (float): Required minimum thickness.
-        max_iterations (int): Maximum repair iterations.
-        locality_sigma (float): Gaussian width for local correction.
-        safety_margin (float): Extra thickness margin per correction step.
+        upper_points (np.ndarray): Upper surface coordinates with shape
+            ``[..., N, 2]``.
+        lower_points (np.ndarray): Lower surface coordinates with shape
+            ``[..., N, 2]`` and identical x-grid as ``upper_points``.
+        min_thickness (float): Target minimum thickness. Use ``0.0`` to only
+            remove overlap.
+        max_iterations (int): Kept for backward compatibility. The method uses
+            a single correction pass by design.
+        locality_sigma (float): Gaussian width used when ``weighting`` is
+            ``"symmetric"``.
+        weighting (WeightingMode):
+            - ``"symmetric"``: mirrored Gaussian decay around the critical
+              point (can alter LE/TE).
+            - ``"edge_anchored"``: piecewise decay that enforces zero weight at
+              LE and TE, preserving original LE/TE thickness.
+        edge_power (float): Exponent controlling sharpness of
+            ``"edge_anchored"`` decay.
 
     Returns:
-        tuple[np.ndarray, np.ndarray]: Repaired `(upper_points, lower_points)`.
+        tuple[np.ndarray, np.ndarray]: Repaired ``(upper_points, lower_points)``
+            with unchanged x-coordinates and repaired y-coordinates.
 
-    Notes:
-        - Fully vectorized across all leading dims.
-        - Keeps x-coordinates unchanged; only y-values are adjusted.
+        Notes:
+                - If the minimum-thickness index is at the first or last chord point
+                    and ``min_thickness == 0``, no correction is applied. This preserves
+                    valid LE/closed-TE contact.
+                - ``weighting="edge_anchored"`` preserves LE and TE thickness exactly
+                    by forcing weights to zero at both ends.
     """
-    if min_thickness < 0:
+    if min_thickness < 0.0:
         raise ValueError("min_thickness must be >= 0.")
-    if locality_sigma <= 0:
+    if max_iterations < 1:
+        raise ValueError("max_iterations must be >= 1.")
+    if locality_sigma <= 0.0:
         raise ValueError("locality_sigma must be > 0.")
+    if edge_power <= 0.0:
+        raise ValueError("edge_power must be > 0.")
 
-    upper_points = np.asarray(upper_points)
-    lower_points = np.asarray(lower_points)
-
-    if upper_points.shape != lower_points.shape:
+    # Normalize/validate input geometry.
+    upper = np.asarray(upper_points)
+    lower = np.asarray(lower_points)
+    if upper.shape != lower.shape:
         raise ValueError("upper_points and lower_points must have identical shape.")
-    if upper_points.ndim < 2 or upper_points.shape[-1] != 2:
-        raise ValueError("upper_points and lower_points must have shape [..., N, 2].")
+    if upper.ndim < 2 or upper.shape[-1] != 2:
+        raise ValueError("Expected shape [..., N, 2] for both inputs.")
 
-    dtype = np.result_type(upper_points.dtype, lower_points.dtype, np.float32)
-    upper_points = upper_points.astype(dtype, copy=False)
-    lower_points = lower_points.astype(dtype, copy=False)
+    dtype = np.result_type(upper.dtype, lower.dtype, np.float64)
+    upper = upper.astype(dtype, copy=False)
+    lower = lower.astype(dtype, copy=False)
 
-    x_upper = upper_points[..., 0]
-    x_lower = lower_points[..., 0]
-    y_u_adj = upper_points[..., 1].copy()
-    y_l_adj = lower_points[..., 1].copy()
-
-    if not np.allclose(x_upper, x_lower, atol=1e-7, rtol=1e-5):
-        raise ValueError("upper_points and lower_points must share the same x-grid.")
+    x_upper = upper[..., 0]
+    x_lower = lower[..., 0]
+    if not np.allclose(x_upper, x_lower, atol=1e-8, rtol=1e-6):
+        raise ValueError("upper_points and lower_points must share x-coordinates.")
 
     lead_shape = x_upper.shape[:-1]
     n_points = x_upper.shape[-1]
     n_samples = int(np.prod(lead_shape)) if lead_shape else 1
 
-    x_flat = x_upper.reshape(n_samples, n_points)
-    y_u_flat = y_u_adj.reshape(n_samples, n_points)
-    y_l_flat = y_l_adj.reshape(n_samples, n_points)
+    # Flatten any leading dimensions to one sample axis for vectorized math.
+    x = x_upper.reshape(n_samples, n_points)
+    y_u = upper[..., 1].reshape(n_samples, n_points).copy()
+    y_l = lower[..., 1].reshape(n_samples, n_points).copy()
 
+    row_idx = np.arange(n_samples)
     eps = np.finfo(dtype).eps
-    envelope = np.clip(x_flat * (1.0 - x_flat), a_min=0.0, a_max=None)
 
-    for _ in range(max_iterations):
-        t = y_u_flat - y_l_flat  # [S, N]
-        idx_min = np.argmin(t, axis=-1)  # [S]
-        t_min = t[np.arange(n_samples), idx_min]  # [S]
-        needs_fix = t_min < min_thickness  # [S]
+    # Single-pass correction: find worst thickness once, then apply one field.
+    thickness = y_u - y_l
+    idx_min = np.argmin(thickness, axis=-1)
+    t_min = thickness[row_idx, idx_min]
+    x0 = x[row_idx, idx_min]
 
-        if not np.any(needs_fix):
-            break
+    # Do not "repair" valid LE/TE contact when target minimum is zero.
+    endpoint_contact = (idx_min == 0) | (idx_min == (n_points - 1))
+    needs_fix = t_min < (min_thickness - eps)
+    if min_thickness == 0.0:
+        needs_fix = needs_fix & (~endpoint_contact)
 
-        x0 = x_flat[np.arange(n_samples), idx_min]  # [S]
-        deficit = np.clip(min_thickness - t_min + safety_margin, 0.0, None)  # [S]
+    # Required symmetric correction at x0.
+    delta = 0.5 * np.clip(min_thickness - t_min, a_min=0.0, a_max=None)
+    delta = np.where(needs_fix, delta, 0.0)
 
-        bump = np.exp(-0.5 * ((x_flat - x0[:, None]) / locality_sigma) ** 2)  # [S, N]
-        bump = bump * envelope
-        bump = bump / (np.max(bump, axis=-1, keepdims=True) + eps)
+    # Build chordwise weights with w(x0)=1.
+    if weighting == "symmetric":
+        weights = np.exp(-0.5 * ((x - x0[:, None]) / locality_sigma) ** 2)
+        weights /= np.maximum(weights.max(axis=-1, keepdims=True), eps)
+    elif weighting == "edge_anchored":
+        left_span = np.maximum(x0, eps)
+        right_span = np.maximum(1.0 - x0, eps)
+        dx = x - x0[:, None]
+        left = dx <= 0.0
+        right = ~left
 
-        delta = 0.5 * deficit[:, None] * bump
-        mask = needs_fix[:, None].astype(delta.dtype)
-        y_u_flat += delta * mask
-        y_l_flat -= delta * mask
+        weights = np.zeros_like(x)
+        d_left = np.abs(dx) / left_span[:, None]
+        d_right = np.abs(dx) / right_span[:, None]
+        weights[left] = np.clip(1.0 - d_left[left], 0.0, 1.0) ** edge_power
+        weights[right] = np.clip(1.0 - d_right[right], 0.0, 1.0) ** edge_power
     else:
-        raise ValueError("Unable to enforce positive thickness within max_iterations.")
+        raise ValueError(f"Unknown weighting mode: {weighting}")
 
-    repaired_upper = upper_points.copy()
-    repaired_lower = lower_points.copy()
-    repaired_upper[..., 1] = y_u_flat.reshape(lead_shape + (n_points,))
-    repaired_lower[..., 1] = y_l_flat.reshape(lead_shape + (n_points,))
+    # Apply symmetric opening once: upper up, lower down.
+    y_u += delta[:, None] * weights
+    y_l -= delta[:, None] * weights
+
+    repaired_upper = upper.copy()
+    repaired_lower = lower.copy()
+    repaired_upper[..., 1] = y_u.reshape(lead_shape + (n_points,))
+    repaired_lower[..., 1] = y_l.reshape(lead_shape + (n_points,))
     return repaired_upper, repaired_lower
 
 
@@ -115,86 +155,120 @@ def repair_negative_thickness_points_torch(
     min_thickness: float = 0.0,
     max_iterations: int = 10,
     locality_sigma: float = 0.02,
-    safety_margin: float = 1e-6,
+    weighting: WeightingMode = "edge_anchored",
+    edge_power: float = 2.0,
 ) -> tuple["_torch.Tensor", "_torch.Tensor"]:
-    """Repair negative local thickness for point clouds using vectorized Torch updates.
+    """Repair negative thickness with one centered correction (PyTorch).
 
-    Accepts `[..., N, 2]` tensors and applies iterative Gaussian local separation in
-    fully vectorized form across all leading dimensions.
+    Torch counterpart of :func:`repair_negative_thickness_points` with identical
+    behavior and parameters, operating on tensors shaped ``[..., N, 2]``.
 
     Args:
-        upper_points (_torch.Tensor): Upper surface points, shape `[..., N, 2]`.
-        lower_points (_torch.Tensor): Lower surface points, shape `[..., N, 2]`.
-        min_thickness (float): Required minimum thickness.
-        max_iterations (int): Maximum repair iterations.
-        locality_sigma (float): Gaussian width for local correction.
-        safety_margin (float): Extra thickness margin per correction step.
+        upper_points (_torch.Tensor): Upper surface coordinates with shape
+            ``[..., N, 2]``.
+        lower_points (_torch.Tensor): Lower surface coordinates with shape
+            ``[..., N, 2]`` and identical x-grid as ``upper_points``.
+        min_thickness (float): Target minimum thickness. Use ``0.0`` to only
+            remove overlap.
+        max_iterations (int): Kept for backward compatibility. The method uses
+            a single correction pass by design.
+        locality_sigma (float): Gaussian width used when ``weighting`` is
+            ``"symmetric"``.
+        weighting (WeightingMode):
+            - ``"symmetric"``: mirrored Gaussian decay around the critical
+              point (can alter LE/TE).
+            - ``"edge_anchored"``: piecewise decay that enforces zero weight at
+              LE and TE, preserving original LE/TE thickness.
+        edge_power (float): Exponent controlling sharpness of
+            ``"edge_anchored"`` decay.
 
     Returns:
-        tuple[_torch.Tensor, _torch.Tensor]: Repaired `(upper_points, lower_points)`.
+        tuple[_torch.Tensor, _torch.Tensor]: Repaired
+            ``(upper_points, lower_points)`` with unchanged x-coordinates.
     """
     if torch is None:
         raise ImportError(
-            "repair_negative_thickness_points_torch requires torch. "
-            "Use repair_negative_thickness_points for NumPy arrays."
+            "PyTorch is not installed. Use repair_negative_thickness_points "
+            "for NumPy arrays."
         )
-    if min_thickness < 0:
-        raise ValueError("min_thickness must be >= 0.")
-    if locality_sigma <= 0:
-        raise ValueError("locality_sigma must be > 0.")
 
+    if min_thickness < 0.0:
+        raise ValueError("min_thickness must be >= 0.")
+    if max_iterations < 1:
+        raise ValueError("max_iterations must be >= 1.")
+    if locality_sigma <= 0.0:
+        raise ValueError("locality_sigma must be > 0.")
+    if edge_power <= 0.0:
+        raise ValueError("edge_power must be > 0.")
+
+    # Validate shape and align dtype for stable numerical operations.
     if upper_points.shape != lower_points.shape:
         raise ValueError("upper_points and lower_points must have identical shape.")
     if upper_points.ndim < 2 or upper_points.shape[-1] != 2:
-        raise ValueError("upper_points and lower_points must have shape [..., N, 2].")
+        raise ValueError("Expected shape [..., N, 2] for both inputs.")
 
-    x_upper = upper_points[..., 0]
-    x_lower = lower_points[..., 0]
-    y_u_adj = upper_points[..., 1].clone()
-    y_l_adj = lower_points[..., 1].clone()
+    dtype = torch.promote_types(upper_points.dtype, lower_points.dtype)
+    if not torch.is_floating_point(torch.empty((), dtype=dtype)):
+        dtype = torch.float32
 
-    if not torch.allclose(x_upper, x_lower, atol=1e-7, rtol=1e-5):
-        raise ValueError("upper_points and lower_points must share the same x-grid.")
+    upper = upper_points.to(dtype=dtype)
+    lower = lower_points.to(dtype=dtype)
+
+    x_upper = upper[..., 0]
+    x_lower = lower[..., 0]
+    if not torch.allclose(x_upper, x_lower, atol=1e-8, rtol=1e-6):
+        raise ValueError("upper_points and lower_points must share x-coordinates.")
 
     lead_shape = x_upper.shape[:-1]
     n_points = x_upper.shape[-1]
-    n_samples = int(np.prod(lead_shape)) if len(lead_shape) > 0 else 1
+    n_samples = int(np.prod(lead_shape)) if lead_shape else 1
 
-    x_flat = x_upper.reshape(n_samples, n_points)
-    y_u_flat = y_u_adj.reshape(n_samples, n_points)
-    y_l_flat = y_l_adj.reshape(n_samples, n_points)
+    # Flatten leading dims for vectorized sample-wise updates.
+    x = x_upper.reshape(n_samples, n_points)
+    y_u = upper[..., 1].reshape(n_samples, n_points).clone()
+    y_l = lower[..., 1].reshape(n_samples, n_points).clone()
 
-    eps = torch.finfo(y_u_flat.dtype).eps
-    envelope = (x_flat * (1.0 - x_flat)).clamp_min(0.0)
+    row_idx = torch.arange(n_samples, device=x.device)
+    eps = torch.finfo(dtype).eps
 
-    for _ in range(max_iterations):
-        t = y_u_flat - y_l_flat  # [S, N]
-        t_min, idx_min = torch.min(t, dim=-1)  # [S], [S]
-        needs_fix = t_min < min_thickness  # [S]
+    # Single-pass correction: find worst thickness once, then apply one field.
+    thickness = y_u - y_l
+    t_min, idx_min = torch.min(thickness, dim=-1)
+    x0 = x[row_idx, idx_min]
 
-        if not torch.any(needs_fix):
-            break
+    endpoint_contact = (idx_min == 0) | (idx_min == (n_points - 1))
+    needs_fix = t_min < (min_thickness - eps)
+    if min_thickness == 0.0:
+        needs_fix = needs_fix & (~endpoint_contact)
 
-        row_idx = torch.arange(n_samples, device=x_flat.device)
-        x0 = x_flat[row_idx, idx_min]  # [S]
-        deficit = (min_thickness - t_min + safety_margin).clamp_min(0.0)  # [S]
+    delta = 0.5 * (min_thickness - t_min).clamp_min(0.0)
+    delta = torch.where(needs_fix, delta, torch.zeros_like(delta))
 
-        bump = torch.exp(-0.5 * ((x_flat - x0.unsqueeze(-1)) / locality_sigma) ** 2)
-        bump = bump * envelope
-        bump = bump / (bump.max(dim=-1, keepdim=True).values + eps)
+    # Build chordwise weights with w(x0)=1.
+    if weighting == "symmetric":
+        weights = torch.exp(-0.5 * ((x - x0.unsqueeze(-1)) / locality_sigma) ** 2)
+        weights = weights / weights.max(dim=-1, keepdim=True).values.clamp_min(eps)
+    elif weighting == "edge_anchored":
+        left_span = x0.clamp_min(eps)
+        right_span = (1.0 - x0).clamp_min(eps)
+        dx = x - x0.unsqueeze(-1)
+        left = dx <= 0.0
+        right = ~left
 
-        delta = 0.5 * deficit.unsqueeze(-1) * bump
-        mask = needs_fix.unsqueeze(-1).to(delta.dtype)
-        y_u_flat = y_u_flat + delta * mask
-        y_l_flat = y_l_flat - delta * mask
-    # else:
-    #     raise ValueError("Unable to enforce positive thickness within max_iterations.")
+        weights = torch.zeros_like(x)
+        d_left = dx.abs() / left_span.unsqueeze(-1)
+        d_right = dx.abs() / right_span.unsqueeze(-1)
+        weights[left] = (1.0 - d_left[left]).clamp_min(0.0).pow(edge_power)
+        weights[right] = (1.0 - d_right[right]).clamp_min(0.0).pow(edge_power)
+    else:
+        raise ValueError(f"Unknown weighting mode: {weighting}")
 
-    repaired_upper = upper_points.clone()
-    repaired_lower = lower_points.clone()
-    repaired_upper[..., 1] = y_u_flat.reshape(*lead_shape, n_points)
-    repaired_lower[..., 1] = y_l_flat.reshape(*lead_shape, n_points)
+    # Symmetric opening once: upper up, lower down.
+    y_u = y_u + delta.unsqueeze(-1) * weights
+    y_l = y_l - delta.unsqueeze(-1) * weights
+
+    repaired_upper = upper.clone()
+    repaired_lower = lower.clone()
+    repaired_upper[..., 1] = y_u.reshape(*lead_shape, n_points)
+    repaired_lower[..., 1] = y_l.reshape(*lead_shape, n_points)
     return repaired_upper, repaired_lower
-
-
-
