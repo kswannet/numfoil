@@ -1016,7 +1016,11 @@ class KulfanModifiedCST(TorchCSTCurve):
         super().__init__(coefficients, n1=n1, n2=n2, device=device)
 
         # Determine surface type
-        self.surface_type = surface_type.lower() or self.infer_surface_type()
+        self.surface_type = (
+            surface_type.lower()
+            if surface_type is not None
+            else self.infer_surface_type()
+        )
 
         # little validation
         if self.surface_type not in ("upper", "lower"):
@@ -1443,7 +1447,7 @@ class KulfanModifiedCST(TorchCSTCurve):
         cls,
         points: torch.Tensor,
         n_coefficients: int = 8,
-        surface_type: Literal["upper", "lower"] = None,
+        trailing_edge_solution: Literal["fit", "data"] = "fit",
         n1: float = 0.5,
         n2: float = 1.0,
         device: Optional[torch.device | str] = None,
@@ -1458,7 +1462,10 @@ class KulfanModifiedCST(TorchCSTCurve):
         Args:
             points: Sampled coordinates, shape [N, 2] or [B, N, 2].
             n_coefficients: Number of CST coefficients (K). Default is 8.
-            surface: "upper" or "lower" to control TE sign.
+            trailing_edge_solution: Strategy for trailing-edge thickness.
+                - "fit": solve signed ``t_te`` jointly with other parameters.
+                - "data": compute signed ``t_te`` from data and keep it fixed
+                  while solving for coefficients and ``w_le``.
             n1 / n2: Class function exponents for the base CST curve.
             device: Optional torch.device override.
             rcond: Cutoff passed to ``torch.linalg.lstsq``.
@@ -1472,13 +1479,13 @@ class KulfanModifiedCST(TorchCSTCurve):
         Dimension overview:
             - points: [B, N, 2]
             - x, y: [B, N]
-            - design matrix M: [B, N, K+2]
-            - solution: [B, K+2] → split into coefficients, w_le, t_te
+            - design matrix M: [B, N, K+2] for "fit", [B, N, K+1] for "data"
+            - solution: [B, K+2] or [B, K+1]
         """
         device = torch.device(device) if device is not None \
             else torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        points = torch.as_tensor(points.copy(), dtype=torch.float32, device=device)
+        points = torch.as_tensor(points, dtype=torch.float32, device=device)
 
         # Validate input shape
         if points.ndim not in (2, 3) or points.shape[-1] != 2:
@@ -1491,31 +1498,38 @@ class KulfanModifiedCST(TorchCSTCurve):
         if points.ndim == 2:
             points = points.unsqueeze(0)  # [B=1, N, 2]
 
+        if trailing_edge_solution not in ("fit", "data"):
+            raise ValueError(
+                f"Invalid trailing_edge_solution: {trailing_edge_solution}. "
+                "Must be 'fit' or 'data'."
+            )
+
         # validate sufficient points
         B, N, _ = points.shape
-        if N < n_coefficients:
+        n_unknowns = n_coefficients + (2 if trailing_edge_solution == "fit" else 1)
+        if N < n_unknowns:
             raise ValueError(
-                f"Need at least {n_coefficients + 2} points to fit "
-            f"{n_coefficients} coefficients + 2 modifiers; received N={N}."
+                f"Need at least {n_unknowns} points to fit "
+                f"{n_coefficients} coefficients + "
+                f"{n_unknowns - n_coefficients} modifiers; received N={N}."
             )
 
         dtype = points.dtype
-        x = points[..., 0]  # [B, N]
-        y = points[..., 1]  # [B, N]
+        x_vals = points[..., 0]  # [B, N]
+        y_vals = points[..., 1]  # [B, N]
 
         # validate x range
-        if torch.any((x < 0) | (x > 1)):
+        if torch.any((x_vals < 0) | (x_vals > 1)):
             raise ValueError("x coordinates must lie within [0, 1].")
 
         # clamp x values to avoid numerical issues at endpoints
         eps = torch.finfo(dtype).eps
-        x = x.clamp(min=eps, max=1.0 - eps)  # Avoid singularities at endpoints
+        x_vals = x_vals.clamp(min=eps, max=1.0 - eps)  # Avoid singularities at endpoints
 
         # Parameters needed for basis construction
         k = torch.arange(n_coefficients, device=device, dtype=dtype)  # [K]
         n = n_coefficients - 1  # degree, scalar
-        x = x.unsqueeze(-1)     # [B, N, 1]
-        y = y.unsqueeze(-1)     # [B, N, 1]
+        x = x_vals.unsqueeze(-1)     # [B, N, 1]
 
         # Binomial coefficients, log-space for numerical stability
         n_plus_1 = torch.full((n_coefficients,), n + 1.0, dtype=dtype, device=device)
@@ -1536,28 +1550,70 @@ class KulfanModifiedCST(TorchCSTCurve):
         # Now the tensor of leading edge modifiers
         le_mod = x * torch.pow(1.0 - x, n + 0.5)          # [B, N, 1]
 
-        # # Tensor of trailing edge modifiers
-        # if surface_type == "upper":
-        #     te_signs = torch.ones(B, 1, dtype=dtype, device=device)     # [B, 1]
-        # elif surface_type == "lower":
-        #     te_signs = -torch.ones(B, 1, dtype=dtype, device=device)    # [B, 1]
-        # else:
-        #     te_signs = torch.sign(torch.diff(points[:, :2, 1], dim=1))  # [B, 1]
+        if trailing_edge_solution == "fit":
+            # Signed TE is solved freely by least squares.
+            te_mod = x / 2.0  # [B, N, 1]
+            Mx_mod = torch.cat([Mx, le_mod, te_mod], dim=-1)  # [B, N, K+2]
+            y_target = y_vals.unsqueeze(-1)  # [B, N, 1]
+        else:
+            te_signed = 2.0 * y_vals[..., -1]  # [B], signed TE from data
+            te_contrib = (x_vals / 2.0) * te_signed.unsqueeze(-1)  # [B, N]
+            y_target = (y_vals - te_contrib).unsqueeze(-1)  # [B, N, 1]
+            Mx_mod = torch.cat([Mx, le_mod], dim=-1)  # [B, N, K+1]
 
-        # [B, 1, 1] * [B, N, 1]
-        # te_mod = te_signs.unsqueeze(1) * x / 2.0                        # [B, N, 1]
+        solution = torch.linalg.lstsq(Mx_mod, y_target, rcond=rcond).solution.squeeze(-1)
 
-        te_mod = x / 2.0  # [B, N, 1]
+        coeffs = solution[..., :n_coefficients]      # [B, K]
+        if trailing_edge_solution == "fit":
+            le_weights = solution[..., -2]           # [B]
+            te_signed = solution[..., -1]            # [B]
+            te_thickness = te_signed.abs()           # [B]
+        else:
+            le_weights = solution[..., -1]           # [B]
+            te_thickness = te_signed.abs()           # [B]
 
-        # Full Design matrix including LE and TE modifiers
-        Mx_mod = torch.cat([Mx, le_mod, te_mod], dim=-1)  # [B, N, K+2]
+        # Determine a single surface_type for the whole batch from signed TE.
+        # If TE is exactly closed, fall back to first coefficient sign.
+        nonzero_mask = torch.abs(te_signed) > eps
+        if torch.any(nonzero_mask):
+            nonzero_sign = torch.sign(te_signed[nonzero_mask])
+            if torch.all(nonzero_sign > 0):
+                inferred_surface_type = "upper"
+            elif torch.all(nonzero_sign < 0):
+                inferred_surface_type = "lower"
+            else:
+                raise ValueError(
+                    "Mixed upper/lower surfaces in batch (inconsistent t_te signs)."
+                )
+        else:
+            # on the off chance that all TE thicknesses are zero, infer from first coefficient sign
+            c0_sign = torch.sign(coeffs[..., 0])
+            if torch.all(c0_sign > 0):
+                inferred_surface_type = "upper"
+            elif torch.all(c0_sign < 0):
+                inferred_surface_type = "lower"
+            else:
+                raise ValueError(
+                    "Cannot infer surface type: trailing-edge sign is zero and "
+                    "first coefficient signs are mixed in batch."
+                )
 
-        solution = torch.linalg.lstsq(Mx_mod, y, rcond=rcond).solution.squeeze(-1)  # [B, K+2]
+        # confirm that the first coefficient signs and TE signs are consistent
+        # but gently so just a lil warning, otherwise you just know this would
+        # throw an error 99% of the time...
+        if not torch.all(torch.sign(coeffs[..., 0]) == torch.sign(te_signed)):
+            warnings.warn(
+                "Inconsistent surface orientation: first coefficient sign does not "
+                "match fitted trailing-edge thickness sign.\n"
+                f"First coeff signs: {torch.sign(coeffs[..., 0]).squeeze().tolist()}\n"
+                f"TE thickness signs: {torch.sign(te_signed).squeeze().tolist()}\n"
+                "This suggests mixed upper/lower surfaces in batch."
+            )
 
-        # split solution and squeeze away empty batch dim if needed
-        coeffs = solution[..., :n_coefficients].squeeze()      # [B, K] or [K]
-        le_weights = solution[..., -2].squeeze()               # [B] or [1]
-        te_thickness = solution[..., -1].squeeze()             # [B] or [1]
+        if B == 1:
+            coeffs = coeffs.squeeze(0)               # [K]
+            le_weights = le_weights.squeeze(0)       # []
+            te_thickness = te_thickness.squeeze(0)   # []
 
         # # Validate surface type consistency
         # first_coeff_signs = torch.sign(coeffs[..., 0])  # [B]
@@ -1584,14 +1640,26 @@ class KulfanModifiedCST(TorchCSTCurve):
         curve = cls(
             coefficients=coeffs,
             leading_edge_weight=le_weights,
-            trailing_edge_thickness=te_thickness.abs(),
-            surface_type=surface_type,
+            trailing_edge_thickness=te_thickness,
+            surface_type=inferred_surface_type,
             n1=n1,
             n2=n2,
             device=device,
         )
         curve._fitted_points = points.detach().clone()  # shape [B, N, 2]
         return curve
+
+    def consistent_surface_type(self) -> bool:
+        """Check if all surface have consistent first coefficient signs and TE thickness signs.
+
+        Returns:
+            bool: True if all curves in batch have matching signs for
+                leading-edge slope and trailing-edge thickness,
+                indicating consistent surface type; False otherwise.
+        """
+        return torch.all(
+            torch.sign(self.coefficients[..., 0]) == torch.sign(self.trailing_edge_thickness)
+        )
 
 
 class TorchPARSECCurve(nn.Module):
