@@ -1444,7 +1444,6 @@ class KulfanModifiedCST(TorchCSTCurve):
         d2y = self.second_derivative_at(x, mode=mode)
         return d2y / torch.pow(1.0 + dy**2, 1.5)
 
-    # TODO fix trailing edge thickness during fit
     @classmethod
     def fit(
         cls,
