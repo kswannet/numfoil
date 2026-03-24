@@ -573,21 +573,23 @@ class TorchKulfanAirfoil(nn.Module):
     def plot(
         self,
         idx: int = 0,
-        name: Optional[str] = None,
+        title: Optional[str] = None,
+        num_points: int = 2000,
         save_dir: Optional[str] = None,
     ) -> "plt.Figure":
         """Plot airfoil using matplotlib.
 
         Args:
             idx (int): Index of airfoil to plot in batch.
-            name (Optional[str]): Title for the plot.
+            title (Optional[str]): Title for the plot.
+            num_points (int): Number of points to evaluate along the chord for a smooth plot.
             save_dir (Optional[str]): Directory to save the plot.
                 Default None, does not save.
 
         Returns:
             Tuple[plt.Figure, plt.Axes]
         """
-        x = torch.linspace(0, 1, 2000, device=self.device)
+        x = torch.linspace(0, 1, num_points, device=self.device)
         y_upper, y_lower = self.forward(x)
 
         if not self.is_batched:
@@ -604,7 +606,7 @@ class TorchKulfanAirfoil(nn.Module):
         ax.plot(x, y_upper[idx], 'b-', label='Upper Kulfan Surface')
         ax.plot(x, y_lower[idx], 'r-', label='Lower Kulfan Surface')
         ax.axis('equal')
-        ax.set_title(name or 'Kulfan Airfoil')
+        ax.set_title(title or 'Kulfan Airfoil')
         ax.set_xlabel('x/c')
         ax.set_ylabel('y/c')
         ax.axis('equal')

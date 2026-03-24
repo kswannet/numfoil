@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
-
 import numpy as np
+import warnings
 
 try:
     import torch
@@ -152,10 +152,10 @@ def repair_negative_thickness_points(
 def repair_negative_thickness_points_torch(
     upper_points: "_torch.Tensor",
     lower_points: "_torch.Tensor",
-    min_thickness: float = 0.0,
+    min_thickness: float = 1e-3,
+    weighting: str = "edge_anchored",
+    locality_sigma: float = 0.1,
     max_iterations: int = 10,
-    locality_sigma: float = 0.02,
-    weighting: WeightingMode = "edge_anchored",
     edge_power: float = 2.0,
 ) -> tuple["_torch.Tensor", "_torch.Tensor"]:
     """Repair negative thickness with one centered correction (PyTorch).
@@ -170,15 +170,14 @@ def repair_negative_thickness_points_torch(
             ``[..., N, 2]`` and identical x-grid as ``upper_points``.
         min_thickness (float): Target minimum thickness. Use ``0.0`` to only
             remove overlap.
-        max_iterations (int): Kept for backward compatibility. The method uses
-            a single correction pass by design.
-        locality_sigma (float): Gaussian width used when ``weighting`` is
-            ``"symmetric"``.
         weighting (WeightingMode):
             - ``"symmetric"``: mirrored Gaussian decay around the critical
-              point (can alter LE/TE).
+                point (can alter LE/TE).
             - ``"edge_anchored"``: piecewise decay that enforces zero weight at
-              LE and TE, preserving original LE/TE thickness.
+                LE and TE, preserving original LE/TE thickness.
+        locality_sigma (float): Standard deviation for the Gaussian weighting function.
+        max_iterations (int): Kept for backward compatibility. The method uses
+            a single correction pass by design.
         edge_power (float): Exponent controlling sharpness of
             ``"edge_anchored"`` decay.
 
@@ -196,8 +195,6 @@ def repair_negative_thickness_points_torch(
         raise ValueError("min_thickness must be >= 0.")
     if max_iterations < 1:
         raise ValueError("max_iterations must be >= 1.")
-    if locality_sigma <= 0.0:
-        raise ValueError("locality_sigma must be > 0.")
     if edge_power <= 0.0:
         raise ValueError("edge_power must be > 0.")
 
@@ -206,6 +203,15 @@ def repair_negative_thickness_points_torch(
         raise ValueError("upper_points and lower_points must have identical shape.")
     if upper_points.ndim < 2 or upper_points.shape[-1] != 2:
         raise ValueError("Expected shape [..., N, 2] for both inputs.")
+    if locality_sigma <= 0.0:
+        raise ValueError("locality_sigma must be > 0.")
+    if 0.15 > locality_sigma < 0.3:
+        warnings.warn(
+            "Low locality_sigma values (<0.15) may cause excessive correction localized corrections, "
+            "leading to a 'bump' in the geometry. High values (>0.3) may excessively effect global geometry."
+        )
+    if weighting not in ("symmetric", "edge_anchored"):
+        raise ValueError(f"Unknown weighting mode: {weighting}")
 
     dtype = torch.promote_types(upper_points.dtype, lower_points.dtype)
     if not torch.is_floating_point(torch.empty((), dtype=dtype)):
@@ -272,3 +278,4 @@ def repair_negative_thickness_points_torch(
     repaired_upper[..., 1] = y_u.reshape(*lead_shape, n_points)
     repaired_lower[..., 1] = y_l.reshape(*lead_shape, n_points)
     return repaired_upper, repaired_lower
+
