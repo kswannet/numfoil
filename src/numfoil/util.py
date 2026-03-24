@@ -146,6 +146,7 @@ def cosine_spacing(start: float, stop: float, num: int, a: float = 1.0) -> np.nd
         * np.abs(2 * 0.5 * (1 - np.cos(np.linspace(0, np.pi, num))) - 1) ** a
     )
 
+
 def chebyshev_nodes(start: float, end:float , num: int) -> np.ndarray:
     """Return Chebyshev-Lobatto nodes over a specified interval.
     Chebyshev-Lobatto nodes cluster more densely at the interval ends and
@@ -178,6 +179,7 @@ def chebyshev_nodes(start: float, end:float , num: int) -> np.ndarray:
         [1]                             # append end
         ))
 
+
 def selig(array) -> np.ndarray:
     """Return a given array of x-locations in Selig format."""
     if array[0] != 0.0 or array[-1] != 1.0 or not np.all(np.diff(array) > 0):
@@ -186,8 +188,14 @@ def selig(array) -> np.ndarray:
         )
     return np.append(array[::-1], array[1:])
 
+
 def weighted_endpoint_spacing(start, end, num_points, weight_func=np.sqrt):
     """Generate points with adjustable weighting for endpoint concentration."""
     linear_points = np.linspace(0, 1, num_points)
     weighted_points = weight_func(linear_points) / weight_func(1)
     return start + (end - start) * weighted_points
+
+
+def smootherstep(x):
+    """Smootherstep function for smooth endpoint tapering."""
+    return 6 * x**5 - 15 * x**4 + 10 * x**3

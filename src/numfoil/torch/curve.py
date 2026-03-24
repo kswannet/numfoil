@@ -1132,6 +1132,8 @@ class KulfanModifiedCST(TorchCSTCurve):
             dim=-1,
         )  # [B>1, n_coefficients + 2]
 
+    params = parameters
+
     @property
     def te_sign(self) -> float:
         """Sign applied to trailing-edge thickness depending on surface.
@@ -1442,6 +1444,7 @@ class KulfanModifiedCST(TorchCSTCurve):
         d2y = self.second_derivative_at(x, mode=mode)
         return d2y / torch.pow(1.0 + dy**2, 1.5)
 
+    # TODO fix trailing edge thickness during fit
     @classmethod
     def fit(
         cls,
