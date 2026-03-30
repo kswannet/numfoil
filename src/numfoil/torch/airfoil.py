@@ -86,7 +86,7 @@ class TorchKulfanAirfoil(nn.Module):
                 f"got {self.upper_surface.trailing_edge_thickness.shape} and "
                 f"{self.lower_surface.trailing_edge_thickness.shape}"
             )
-        # !!!
+        # # ! some way to turn this off? always turn this off? but then no validation?
         # if self.thickness_at(torch.linspace(0, 1, 200)).min() < 0:
         #     raise ValueError(
         #         "Negative thickness detected in airfoil. Check parameters or increase tolerance."
