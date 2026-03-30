@@ -1401,7 +1401,7 @@ class NACA4Airfoil(AirfoilBase):
         self.max_camber, self.camber_location, self.max_thickness = self.parse_naca_code(
             naca_code
         )
-        if self.max_camber == 0 ^ self.camber_location == 0:
+        if (self.max_camber == 0) ^ (self.camber_location == 0):
             raise ValueError(
                 "Non-zero camber value cannot have 0 as chordwise location."
             )
@@ -1546,4 +1546,57 @@ class NACA4Airfoil(AirfoilBase):
             )
         else:
             raise ValueError("NACA code must contain 4 numbers")
+
+    # For compatibility, individual curves are also represented as splines
+    # @cached_property
+    def upper_surface(self) -> ParametricCurve:
+        """Returns the upper surface curve of the airfoil as Bspline."""
+        return BSpline2D(
+            np.column_stack([
+                x := cosine_spacing(0, 1, num=200),
+                self.upper_surface_at(x)
+            ])
+        )
+
+    # @cached_property
+    def lower_surface(self) -> ParametricCurve:
+        """Returns the lower surface curve of the airfoil as Bspline."""
+        return BSpline2D(
+            np.column_stack([
+                x := cosine_spacing(0, 1, num=200),
+                self.lower_surface_at(x)
+            ])
+        )
+
+    # @cached_property
+    def surface(self)-> ParametricCurve:
+        x = cosine_spacing(0, 1, num=200)
+        return BSpline2D(
+            np.vstack([
+                np.column_stack([ x, self.upper_surface_at(x)])[::-1],
+                np.column_stack([ x, self.lower_surface_at(x)])[1:]
+            ])
+        )
+
+    # @cached_property
+    def camber_line(self) -> ParametricCurve:
+        """Returns the camber line curve of the airfoil as Bspline."""
+        return BSpline2D(
+            np.column_stack([
+                x := cosine_spacing(0, 1, num=200),
+                self.camber_at(x)[:, 1]
+            ])
+        )
+
+    # @cached_property
+    def thickness_distribution(self) -> ParametricCurve:
+        """Returns the thickness distribution curve of the airfoil as Bspline."""
+        return BSpline2D(
+            np.column_stack([
+                x := cosine_spacing(0, 1, num=200),
+                self.thickness_at(x)
+            ])
+        )
+
+
 
