@@ -1,6 +1,7 @@
 import numpy as np
 
 from numfoil.data.repair import repair_negative_thickness_points
+from numfoil.data.repair import is_selig
 
 
 def _build_points_from_thickness(x: np.ndarray, thickness: np.ndarray):
@@ -161,3 +162,31 @@ def test_repair_meets_minimum_thickness_at_critical_point():
     repaired_thickness = repaired_upper[:, 1] - repaired_lower[:, 1]
     # Core contract: the worst point is repaired up to the target threshold.
     assert repaired_thickness[40] >= (target_min - 1e-12)
+
+
+def test_is_selig_accepts_valid_selig_ordering():
+    x = np.array([1.0, 0.8, 0.4, 0.0, 0.3, 0.7, 1.0])
+    y = np.array([0.0, 0.02, 0.04, 0.0, -0.03, -0.01, 0.0])
+    points = np.stack([x, y], axis=-1)
+
+    assert is_selig(points)
+
+
+def test_is_selig_rejects_non_selig_ordering():
+    x = np.array([0.0, 0.2, 0.5, 1.0])
+    y = np.zeros_like(x)
+    points = np.stack([x, y], axis=-1)
+
+    assert not is_selig(points)
+
+
+def test_is_selig_supports_batched_inputs():
+    valid_x = np.array([1.0, 0.7, 0.2, 0.0, 0.6, 1.0])
+    invalid_x = np.array([1.0, 0.5, 0.2, 0.0, 0.4, 0.3])
+    y = np.zeros_like(valid_x)
+
+    valid = np.stack([valid_x, y], axis=-1)
+    invalid = np.stack([invalid_x, y], axis=-1)
+    batch = np.stack([valid, invalid], axis=0)
+
+    np.testing.assert_array_equal(is_selig(batch), np.array([True, False]))

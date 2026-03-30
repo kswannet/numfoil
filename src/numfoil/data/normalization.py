@@ -54,7 +54,7 @@ class AirfoilNormalizer:
         return cls._apply_transformation(points, scale, translation, rotation).T
 
     @classmethod
-    def normalized_bspline(cls, data: np.ndarray | BSpline2D, find_trailing_edge: bool = True) -> BSpline2D:
+    def normalized_bspline(cls, data: np.ndarray | BSpline2D) -> BSpline2D:
         """Normalizes airfoil data and returns it as a BSpline2D object.
 
         Args:
