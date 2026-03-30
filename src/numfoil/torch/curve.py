@@ -1450,6 +1450,7 @@ class KulfanModifiedCST(TorchCSTCurve):
         points: torch.Tensor,
         n_coefficients: int = 8,
         trailing_edge_solution: Literal["fit", "data"] = "fit",
+        surface_type: str = None,
         n1: float = 0.5,
         n2: float = 1.0,
         device: Optional[torch.device | str] = None,
@@ -1599,6 +1600,13 @@ class KulfanModifiedCST(TorchCSTCurve):
                     "Cannot infer surface type: trailing-edge sign is zero and "
                     "first coefficient signs are mixed in batch."
                 )
+
+        # a little extra validation doesn't hurt... right?
+        if surface_type is not None and surface_type.lower() != inferred_surface_type:
+            raise ValueError(
+                f"Provided surface_type ('{surface_type}') conflicts with inferred type ('{inferred_surface_type}'), "
+                f" based on trailing edge value or first coefficient sign."
+            )
 
         # confirm that the first coefficient signs and TE signs are consistent
         # but gently so just a lil warning, otherwise you just know this would

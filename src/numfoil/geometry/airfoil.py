@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import re
 
 import scipy.interpolate as si
 import scipy.optimize as opt
@@ -14,9 +15,10 @@ from ..data.datafile import AirfoilDataFile
 from ..data.normalization import AirfoilNormalizer
 from ..util import cosine_spacing, chebyshev_nodes, ensure_1d_vector, selig
 from .spline import *
-from .geom2d import Point2D
+from .geom2d import Point2D, normalize_2d, rotate_2d_90ccw
 
 
+AIRFOIL_REPR_REGEX = re.compile(r"[.]([A-Z])\w+")
 EPS = 1e-12
 
 class AirfoilBase(ABC):
@@ -234,7 +236,7 @@ class AirfoilBase(ABC):
     def trailing_edge(self) -> float:
         """Returns the trailing edge ordinate of the airfoil."""
         return 0.5 * (
-            self.upper_surface_at(1.0) + self.lower_surface_at(1.0)
+            self.upper_surface.evaluate_at(1.0) + self.lower_surface.evaluate_at(1.0)
         )
 
     @cached_property
@@ -242,6 +244,13 @@ class AirfoilBase(ABC):
         """Returns the gap between the upper and lower surfaces at the trailing edge."""
         return np.abs(
             self.upper_surface_at(1) - self.lower_surface_at(1)
+        )
+
+    @cached_property
+    def leading_edge(self) -> float:
+        """Returns the leading edge ordinate of the airfoil."""
+        raise NotImplementedError(
+            "Leading edge undefined."
         )
 
     @cached_property
@@ -299,13 +308,13 @@ class AirfoilBase(ABC):
             np.column_stack([x, self.lower_surface_at(x)])[1:],
         ]).view(Point2D)
 
-    def plot(self, n_points=1000):
+    def plot(self, n_points=1000, **pltkwargs):
         """Plots the airfoil geometry."""
-        x = cosine_spacing(0,1, num=n_points)
+        x = cosine_spacing(0, 1, num=n_points)
         fig, ax = plt.subplots()
-        ax.plot(x, self.upper_surface_at(x), label="Upper Surface")
-        ax.plot(x, self.lower_surface_at(x), label="Lower Surface")
-        ax.plot(x, self.camber_at(x), label="Camber Line")
+        ax.plot(x, self.upper_surface_at(x), label="Upper Surface", **pltkwargs)
+        ax.plot(x, self.lower_surface_at(x), label="Lower Surface", **pltkwargs)
+        ax.plot(x, self.camber_at(x), label="Camber Line", **pltkwargs)
         ax.set_title(
             self.description.replace("#", "") \
             or self.name \
@@ -341,7 +350,13 @@ class BsplineAirfoil(AirfoilBase):
         # the full name of the airfoil, usually from the file header
         self.description = name if description is None else description.replace(' AIRFOIL', '')
 
-        self.u_leading_edge = self.surface_curve.u_leading_edge
+        # If the spline is not a normalized one, these properties still need to
+        # be added. There should be a better way to do this, but problems for later
+        if not hasattr(self.surface_curve, 'u_leading_edge'):
+            self.surface_curve.leading_edge, self.surface_curve.u_leading_edge = AirfoilNormalizer._find_leading_edge(
+                self.surface_curve,
+                0.5 * (self.surface_curve.evaluate_at(0) + self.surface_curve.evaluate_at(1))
+            )
 
     @classmethod
     def from_coordinate_array(
@@ -502,8 +517,12 @@ class BsplineAirfoil(AirfoilBase):
                 )
             )
         )
-        # force final control point to bet at x=1
+        # endpoint snapping to avoid precision errors
         adjusted_control_points = curve.control_points
+        # force leading edge point to be at x=0
+        adjusted_control_points[0][0] = 0.0
+        adjusted_control_points[0][1] = 0.0
+        # force final control point to bet at x=1
         direction = adjusted_control_points[-1] - adjusted_control_points[-2]
         magnitude = (1.0 - adjusted_control_points[-1][0]) / direction[0]
         adjusted_control_points[-1] += magnitude * direction
@@ -524,8 +543,12 @@ class BsplineAirfoil(AirfoilBase):
                 )
             )
         )
-        # force final control point to bet at x=1
+        # endpoint snapping to avoid precision errors
         adjusted_control_points = curve.control_points
+        # force leading edge point to be at x=0
+        adjusted_control_points[0][0] = 0.0
+        adjusted_control_points[0][1] = 0.0
+        # force final control point to bet at x=1
         direction = adjusted_control_points[-1] - adjusted_control_points[-2]
         magnitude = (1.0 - adjusted_control_points[-1][0]) / direction[0]
         adjusted_control_points[-1] += magnitude * direction
@@ -650,9 +673,11 @@ class BezierAirfoil(AirfoilBase):
                 formatted with a proper leading and trailing edge)
 
             fit_method (str):
-                Method to fit the airfoil. Options are: - "full": Fit the entire
-                curve at once. - "split_u_l": Split the points into upper and
-                lower and fit
+                Method to fit the airfoil. Options are:
+                - "full": Fit the entire curve at once. Slow and risks swapping
+                    upper and lower surfaces if the fit is poor, especially for
+                    thin airfoils. Not recommended.
+                - "split_u_l": Split the points into upper and lower and fit
                     those separately. Preferred method as it is much faster.
                 - "split_t_c": First determine camber and thickness values, then
                     fit bezier curves to those.
@@ -741,7 +766,7 @@ class BezierAirfoil(AirfoilBase):
             )
 
         if normalize:
-            normalized_bspline = AirfoilNormalizer.normalized_bspline(points, find_trailing_edge=find_trailing_edge)
+            normalized_bspline = AirfoilNormalizer.normalized_bspline(points)
             # If the bspline fits poorly and causes overlap, us the original points
             if np.any((normalized_bspline.evaluate_at(np.linspace(0, normalized_bspline.u_leading_edge, 1000)).y - normalized_bspline.evaluate_at(np.linspace(normalized_bspline.u_leading_edge, 1, 1000)).y).round(8) < 0):
                 points = AirfoilNormalizer.normalize_points(points).round(8)
@@ -1348,5 +1373,177 @@ class CSTAirfoil(AirfoilBase):
 
 
 class NACA4Airfoil(AirfoilBase):
-    def __init__(self):
-        pass
+    """Creates a NACA 4 series :py:class:`Airfoil` from digit input.
+    NACA code format "NACAcxtt":
+        - c: maximum camber value * 100
+        - x: chordwise location of maximum camber * 10
+        - tt: maximum thickness * 100
+
+    Args:
+        naca_code: 4-digit NACA airfoil code, i.e. "naca0012" or "0012"
+
+    Keyword Arguments:
+        te_closed: Sets if the trailing-edge of the airfoil is closed.
+            Defaults to False.
+
+    Attributes:
+        max_camber: Maximum camber as a percentage of the chord. Valid
+            inputs range from 0-9 % maximum camber. Defaults to 0.
+        camber_location: Location of maximum camber in tenths of the
+            chord length. A value of 1 would mean 10% of the chord.
+            Defaults to 0.
+        max_thickness: Maximum thickness as a percentage of the chord.
+    """
+
+    def __init__(
+        self, naca_code: str, *, te_closed: bool = False,
+    ):
+        self.max_camber, self.camber_location, self.max_thickness = self.parse_naca_code(
+            naca_code
+        )
+        if self.max_camber == 0 ^ self.camber_location == 0:
+            raise ValueError(
+                "Non-zero camber value cannot have 0 as chordwise location."
+            )
+
+        self.te_closed = te_closed
+
+    @property
+    def cambered(self) -> bool:
+        """Returns if the current :py:class:`Airfoil` is cambered."""
+        return self.max_camber != 0 and self.camber_location != 0
+
+    def camber_at(self, x: Union[float, np.ndarray]) -> np.ndarray:
+        """Returns camber-line points at the supplied ``x``."""
+        # Setting up chord-line and camber-line point arrays
+        x = self.ensure_1d_vector(x)
+        pts_c = np.zeros((x.size, 2))
+        pts_c[:, 0] = x
+
+        # Localizing inputs for speed and clarity
+        m = self.max_camber
+        p = self.camber_location
+
+        if self.cambered:
+            fwd, aft = x <= p, x > p  # Indices before and after max ordinate
+            pts_c[fwd, 1] = (m / (p ** 2)) * (2 * p * x[fwd] - x[fwd] ** 2)
+            pts_c[aft, 1] = (m / (1 - p) ** 2) * (
+                (1 - 2 * p) + 2 * p * x[aft] - x[aft] ** 2
+            )
+        return pts_c
+
+    def thickness_at(self, x: Union[float, np.ndarray]) -> np.ndarray:
+        """Returns the thickness value at ``x``."""
+        return 2 * self.half_thickness_at(x)
+
+    def camber_tangent_at(self, x: Union[float, np.ndarray]) -> np.ndarray:
+        """Returns the camber-line tangent vector at supplied ``x``."""
+        # Setting up chord-line and camber-line tangent arrays
+        x = self.ensure_1d_vector(x)
+        t_c = np.repeat(
+            np.array([[1, 0]], dtype=np.float64), repeats=x.size, axis=0
+        )
+
+        # Localizing inputs for speed and clarity
+        m = self.max_camber
+        p = self.camber_location
+
+        if self.cambered:
+            fwd, aft = x <= p, x > p  # Indices before and after max ordinate
+            t_c[fwd, 1] = (2 * m / p ** 2) * (p - x[fwd])
+            t_c[aft, 1] = (2 * m / (1 - p) ** 2) * (p - x[aft])
+
+        return normalize_2d(t_c, inplace=True)
+
+    def camber_normal_at(self, x: Union[float, np.ndarray]) -> np.ndarray:
+        """Returns the camber-line normal vector at supplied ``x``.
+
+        Note:
+            This method implements a fast 2D Affine Transform.
+        """
+        return rotate_2d_90ccw(self.camber_tangent_at(x))
+
+    def upper_surface_at(self, x: np.ndarray) -> np.ndarray:
+        """Returns upper surface points at the supplied ``x``."""
+        return self.camber_at(x) + self.offset_vectors_at(x)
+
+    def lower_surface_at(self, x: np.ndarray) -> np.ndarray:
+        """Returns lower surface points at the supplied ``x``."""
+        return self.camber_at(x) - self.offset_vectors_at(x)
+
+    def offset_vectors_at(self, x: np.ndarray) -> np.ndarray:
+        """Returns half-thickness magnitude vectors at ``x``."""
+        n_c = self.camber_normal_at(x)  # Camber normal-vectors
+        y_t = self.half_thickness_at(x)  # Half thicknesses
+        return np.multiply(n_c, y_t.reshape(x.size, 1), out=n_c)
+
+    def half_thickness_at(self, x: np.ndarray) -> np.ndarray:
+        """Calculates the NACA-4 series 'Half-Thickness' y_t at ``x``.
+
+        Args:
+            x: Chord-line fraction (0 = LE, 1 = TE)
+        """
+        x = self.ensure_1d_vector(x)
+        return (self.max_thickness / 0.2) * (
+            0.2969 * np.sqrt(x)
+            - 0.1260 * x
+            - 0.3516 * (x ** 2)
+            + 0.2843 * (x ** 3)
+            - (0.1036 if self.te_closed else 0.1015) * (x ** 4)
+        )
+
+    def plot(self, *args, show: bool = True, **kwargs):
+        """Specializes the :py:class:`Airfoil` plot with a title."""
+        # Turning off plot display to be able to display after the
+        # title is added to the plot
+        fig, ax = super().plot(*args, **kwargs, show=False)
+        ax.set_title(
+            "{name} {te_shape} Trailing-Edge Airfoil".format(
+                name=self.name, te_shape="Closed" if self.te_closed else "Open"
+            )
+        )
+        plt.show() if show else ()  # Rendering plot window if show is true
+        return fig, ax
+
+    @property
+    def name(self) -> str:
+        """Returns the name of the airfoil from current attributes."""
+        return "NACA{m:.0f}{p:.0f}{t:02.0f}".format(
+            m=self.max_camber * 100,
+            p=self.camber_location * 10,
+            t=self.max_thickness * 100,
+        )
+
+    def __repr__(self) -> str:
+        """Overwrites string repr. to include airfoil name."""
+        return re.sub(
+            AIRFOIL_REPR_REGEX, f".{self.name}Airfoil", super().__repr__()
+        )
+
+    @staticmethod
+    def parse_naca_code(naca_code: str) -> map:
+        """Parses a ``naca_code`` into the 3 (scaled) values needed:
+        max camber, max camber location, and maximum thickness.
+
+        Note:
+            ``naca_code`` can include the prefix "naca" or "NACA".
+
+        Raise:
+            ValueError: If a``naca_code`` is supplied with
+                missing digits or invalid characters.
+
+        Returns:
+            Tuple(float, float, float):
+                max camber, max camber location, max thickness.
+        """
+        digits = naca_code.upper().strip("NACA")
+        if len(digits) == 4 and all(d.isdigit() for d in digits):
+            max_camber, camber_location, max_t1, max_t2 = map(int, digits)
+            return (
+                max_camber / 100,
+                camber_location / 10,
+                float(f".{max_t1}{max_t2}")  # 0."t1""t2"
+            )
+        else:
+            raise ValueError("NACA code must contain 4 numbers")
+

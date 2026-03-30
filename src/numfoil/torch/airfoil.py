@@ -333,6 +333,13 @@ class TorchKulfanAirfoil(nn.Module):
         """
         return self.lower_surface(x)
 
+    @property
+    def surface(self) -> None:
+        raise NotImplementedError(
+            "Torch based Kulfan CST parameterization does not support a single unified surface curve representation."
+            " Use upper_surface and lower_surface separately."
+        )
+
     def thickness_at(self, x: torch.Tensor) -> torch.Tensor:
         """Local thickness t(x) = y_upper(x) - y_lower(x)"""
         y_upper, y_lower = self.forward(x)
@@ -353,8 +360,17 @@ class TorchKulfanAirfoil(nn.Module):
     @property
     def thickness_distribution(self) -> KulfanModifiedCST:
         return KulfanModifiedCST.fit(
-            self.thickness_at(torch.linspace(0, 1, 200, device=self.device)).round(6),
+            self.thickness_at(torch.linspace(0, 1, 200, device=self.device)),
+            trailing_edge_solution="data",
             surface_type="upper",  # thickness is always positive, so "upper" type is appropriate
+            n_coefficients=self.upper_surface.n_coefficients,  # use same number of coeffs as upper surface
+        )
+
+    @property
+    def camber_line(self) -> KulfanModifiedCST:
+        return KulfanModifiedCST.fit(
+            self.camber_at(torch.linspace(0, 1, 200, device=self.device)),
+            trailing_edge_solution="data",
             n_coefficients=self.upper_surface.n_coefficients,  # use same number of coeffs as upper surface
         )
 
