@@ -17,6 +17,7 @@
 from typing import Sequence, Tuple, Union
 
 import numpy as np
+from math import comb
 from scipy.interpolate import interp1d
 
 
@@ -196,6 +197,72 @@ def weighted_endpoint_spacing(start, end, num_points, weight_func=np.sqrt):
     return start + (end - start) * weighted_points
 
 
-def smootherstep(x):
-    """Smootherstep function for smooth endpoint tapering."""
-    return 6 * x**5 - 15 * x**4 + 10 * x**3
+# def smootherstep(x):
+#     """Smootherstep function for smooth endpoint tapering."""
+#     return 6 * x**5 - 15 * x**4 + 10 * x**3
+
+def smoothstep(x, N=2, deriv=0):
+    """
+    Generalized smoothstep S_N(x)
+
+    Args:
+        x (float or np.ndarray):
+            Input value(s), expected in [0, 1]
+        N (int):
+            Order of smoothstep (polynomial degree = 2N + 1)
+            Default is 2, which corresponds to the smootherstep
+            :math:`S_2(x) = 6x^5 - 15x^4 + 10x^3`
+        deriv (int {0,1,2}):
+            - 0 -> function value `S_N(x)`
+            - 1 -> first derivative `S_N'(x)`
+            - 2 -> second derivative `S_N''(x)`
+
+    Returns:
+        float or np.ndarray, function evaluation(s) of S_N(x) or its derivatives.
+    """
+    # # I guess this does not matter...
+    # EPS = 1e-10
+    # if x.min() < -EPS or x.max() > 1 + EPS:
+    #     raise ValueError(
+    #         "Input x must be in the range [0, 1], "
+    #         "but got values in [{:.3g}, {:.3g}]".format(x.min(), x.max())
+    #     )
+    # x = np.clip(x, 0.0, 1.0)
+
+    # clip just in case
+    x = np.asarray(x).clip(0.0, 1.0)
+
+    match deriv:
+        case 0:
+            S = np.zeros_like(x, dtype=float)
+            for n in range(N + 1):
+                S += (
+                    (-1)**n
+                    * comb(N + n, n)
+                    * comb(2 * N + 1, N - n)
+                    * x**(N + n + 1)
+                )
+            return S
+
+        case 1:
+            return (
+                (2 * N + 1)
+                * comb(2 * N, N)
+                * (x - x**2)**N
+            )
+
+        case 2:
+            return (
+                (2 * N + 1)
+                * comb(2 * N, N)
+                * N
+                * (x - x**2)**(N - 1)
+                * (1 - 2 * x)
+            )
+
+        case _:
+            raise ValueError(
+                "derivative must be 0, 1, or 2, "
+                f"but got {deriv}."
+            )
+
