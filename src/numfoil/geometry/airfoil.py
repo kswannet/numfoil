@@ -14,12 +14,19 @@ from  warnings import warn as warning
 from ..data.datafile import AirfoilDataFile
 from ..data.normalization import AirfoilNormalizer
 from ..util import cosine_spacing, chebyshev_nodes, ensure_1d_vector, selig
-from .spline import *
+from .spline import (
+    Curve,
+    ParametricCurve,
+    BSpline2D,
+    Bezier, SplevCBezier, SplevBezier,
+    CSTCurve, CSTAirfoilSurface,
+)
 from .geom2d import Point2D, normalize_2d, rotate_2d_90ccw
 
 
 AIRFOIL_REPR_REGEX = re.compile(r"[.]([A-Z])\w+")
 EPS = 1e-12
+
 
 class AirfoilBase(ABC):
     """Abstract Base Class definition of an :py:class:`Airfoil`.
@@ -73,6 +80,11 @@ class AirfoilBase(ABC):
         points = self.upper_surface.evaluate_at(
             cosine_spacing(0, 1, num=200)
         )
+        if not np.all(np.diff(points) > 0):
+            warning(
+                "Upper surface x-coordinates are not strictly increasing. "
+                "Interpolator may be inaccurate."
+            )
         # filter out all points with non-increasing x-coordinates
         # this prevents a lot of headaches
         x, y = points[points[:, 0] == np.maximum.accumulate(points[:, 0])].T
@@ -96,6 +108,11 @@ class AirfoilBase(ABC):
         points = self.lower_surface.evaluate_at(
             cosine_spacing(0, 1, num=200)
         )
+        if not np.all(np.diff(points) > 0):
+            warning(
+                "Upper surface x-coordinates are not strictly increasing. "
+                "Interpolator may be inaccurate."
+            )
         x, y = points[points[:, 0] == np.maximum.accumulate(points[:, 0])].T
         assert np.all(np.diff(x) > 0)
         return si.PchipInterpolator(x, y, extrapolate=True)
@@ -308,7 +325,7 @@ class AirfoilBase(ABC):
             np.column_stack([x, self.lower_surface_at(x)])[1:],
         ]).view(Point2D)
 
-    def plot(self, n_points=1000, **pltkwargs):
+    def plot(self, n_points=1000, show=False, **pltkwargs):
         """Plots the airfoil geometry."""
         x = cosine_spacing(0, 1, num=n_points)
         fig, ax = plt.subplots()
@@ -316,13 +333,15 @@ class AirfoilBase(ABC):
         ax.plot(x, self.lower_surface_at(x), label="Lower Surface", **pltkwargs)
         ax.plot(x, self.camber_at(x), label="Camber Line", **pltkwargs)
         ax.set_title(
-            self.description.replace("#", "") \
-            or self.name \
+            self.description.replace("#", "")
+            or self.name
             or "Airfoil"
         )
         ax.set_aspect("equal", adjustable="box")
         ax.legend(loc="best")
         ax.set_ylim(-0.4, 0.4)
+        if show:
+            plt.show()
         return fig, ax
 
 
@@ -353,7 +372,7 @@ class BsplineAirfoil(AirfoilBase):
         # If the spline is not a normalized one, these properties still need to
         # be added. There should be a better way to do this, but problems for later
         if not hasattr(self.surface_curve, 'u_leading_edge'):
-            self.surface_curve.leading_edge, self.surface_curve.u_leading_edge = AirfoilNormalizer._find_leading_edge(
+            self.surface_curve.leading_edge, self.surface_curve.u_leading_edge = AirfoilNormalizer.find_leading_edge(
                 self.surface_curve,
                 0.5 * (self.surface_curve.evaluate_at(0) + self.surface_curve.evaluate_at(1))
             )
@@ -511,7 +530,7 @@ class BsplineAirfoil(AirfoilBase):
             ParametricCurve: The upper surface Bspline object of the airfoil.
         """
         curve = BSpline2D(
-            AirfoilNormalizer._remove_overshoots(
+            AirfoilNormalizer.remove_overshoots(
                 self.surface.evaluate_at(
                     cosine_spacing(0, self.surface.u_leading_edge, num=100)[::-1]
                 )
@@ -537,7 +556,7 @@ class BsplineAirfoil(AirfoilBase):
             ParametricCurve: The lower surface Bspline object of the airfoil.
         """
         curve = BSpline2D(
-            AirfoilNormalizer._remove_overshoots(
+            AirfoilNormalizer.remove_overshoots(
                 self.surface.evaluate_at(
                     cosine_spacing(self.surface.u_leading_edge, 1, num=100)
                 )
@@ -796,7 +815,7 @@ class BezierAirfoil(AirfoilBase):
             else:
                 # To improve the fitting of the new spline, points are
                 # resampled from the normalized spline.
-                points = AirfoilNormalizer._remove_overshoots(
+                points = AirfoilNormalizer.remove_overshoots(
                     normalized_bspline.evaluate_at(
                         np.hstack([
                             cosine_spacing(0, normalized_bspline.u_leading_edge, num=100),
@@ -1184,7 +1203,7 @@ class BezierAirfoil(AirfoilBase):
             0.5 * (
                 self.upper_surface.control_points[:,1] +
                 self.lower_surface.control_points[:,1]
-                )
+            )
         ])
         return SplevBezier(camber_control_points)
 
@@ -1370,8 +1389,6 @@ class CSTAirfoil(AirfoilBase):
         return CSTCurve.fit(camber, num_coefficients=6, n1=1.0, n2=1.0,)
 
 
-
-
 class NACA4Airfoil(AirfoilBase):
     """Creates a NACA 4 series :py:class:`Airfoil` from digit input.
     NACA code format "NACAcxtt":
@@ -1413,84 +1430,117 @@ class NACA4Airfoil(AirfoilBase):
         """Returns if the current :py:class:`Airfoil` is cambered."""
         return self.max_camber != 0 and self.camber_location != 0
 
+    @cached_property
+    def naca_camber_curve(self):
+        class Camberline(Curve):
+            def __init__(self, m, p):
+                self.max_camber = m
+                self.camber_location = p
+
+            @property
+            def cambered(self) -> bool:
+                """Returns if the current :py:class:`Airfoil` is cambered."""
+                return self.max_camber != 0 and self.camber_location != 0
+
+            def evaluate_at(self, x: Union[float, np.ndarray]) -> np.ndarray:
+                """Returns camber-line points at the supplied ``x``.
+                Args:
+                    x: Chord-line fractions (0 = LE, 1 = TE), length n
+                Returns:
+                    np.ndarray: Camber-line points at x, with shape (n, 2)
+                """
+                # Setting up chord-line and camber-line point arrays
+                x = ensure_1d_vector(x)
+                pts_c = np.zeros((x.size, 2))
+                pts_c[:, 0] = x
+
+                # Localizing inputs for speed and clarity
+                m = self.max_camber
+                p = self.camber_location
+
+                if self.cambered:
+                    fwd, aft = x <= p, x > p  # Indices before and after max ordinate
+                    pts_c[fwd, 1] = (m / (p ** 2)) * (2 * p * x[fwd] - x[fwd] ** 2)
+                    pts_c[aft, 1] = (m / (1 - p) ** 2) * (
+                        (1 - 2 * p) + 2 * p * x[aft] - x[aft] ** 2
+                    )
+                return pts_c
+
+            def first_deriv_at(self, x: Union[float, np.ndarray]) -> np.ndarray:
+                """Returns the camber-line tangent vector at supplied ``x``."""
+                # Setting up chord-line and camber-line tangent arrays
+                x = ensure_1d_vector(x)
+                t_c = np.repeat(
+                    np.array([[1, 0]], dtype=np.float64), repeats=x.size, axis=0
+                )
+
+                # Localizing inputs for speed and clarity
+                m = self.max_camber
+                p = self.camber_location
+
+                if self.cambered:
+                    fwd, aft = x <= p, x > p  # Indices before and after max ordinate
+                    t_c[fwd, 1] = (2 * m / p ** 2) * (p - x[fwd])
+                    t_c[aft, 1] = (2 * m / (1 - p) ** 2) * (p - x[aft])
+
+                return t_c
+
+            def __call__(self, x: Union[float, np.ndarray]) -> np.ndarray:
+                return self.evaluate_at(x)
+
+        return Camberline(self.max_camber, self.camber_location)
+
     def camber_at(self, x: Union[float, np.ndarray]) -> np.ndarray:
-        """Returns camber-line points at the supplied ``x``."""
-        # Setting up chord-line and camber-line point arrays
-        x = self.ensure_1d_vector(x)
-        pts_c = np.zeros((x.size, 2))
-        pts_c[:, 0] = x
+        """Returns camber-line ordinates at the supplied ``x``."""
+        return self.camber_line.evaluate_at(x)[:, 1]
 
-        # Localizing inputs for speed and clarity
-        m = self.max_camber
-        p = self.camber_location
+    @cached_property
+    def naca_thickness_distribution(self):
+        class ThicknessDistribution(Curve):
+            def __init__(self, t, te):
+                self.max_thickness = t
+                self.te_closed = te
 
-        if self.cambered:
-            fwd, aft = x <= p, x > p  # Indices before and after max ordinate
-            pts_c[fwd, 1] = (m / (p ** 2)) * (2 * p * x[fwd] - x[fwd] ** 2)
-            pts_c[aft, 1] = (m / (1 - p) ** 2) * (
-                (1 - 2 * p) + 2 * p * x[aft] - x[aft] ** 2
-            )
-        return pts_c
+            def half_thickness_at(self, x: np.ndarray) -> np.ndarray:
+                """Calculates the NACA-4 series 'Half-Thickness' y_t at ``x``.
 
-    def thickness_at(self, x: Union[float, np.ndarray]) -> np.ndarray:
-        """Returns the thickness value at ``x``."""
-        return 2 * self.half_thickness_at(x)
+                Args:
+                    x: Chord-line fraction (0 = LE, 1 = TE)
+                Returns:
+                    y_t: Half-thickness at x.
+                """
+                x = ensure_1d_vector(x)
+                return (self.max_thickness / 0.2) * (
+                    0.2969 * np.sqrt(x)
+                    - 0.1260 * x
+                    - 0.3516 * (x ** 2)
+                    + 0.2843 * (x ** 3)
+                    - (0.1036 if self.te_closed else 0.1015) * (x ** 4)
+                )
 
-    def camber_tangent_at(self, x: Union[float, np.ndarray]) -> np.ndarray:
-        """Returns the camber-line tangent vector at supplied ``x``."""
-        # Setting up chord-line and camber-line tangent arrays
-        x = self.ensure_1d_vector(x)
-        t_c = np.repeat(
-            np.array([[1, 0]], dtype=np.float64), repeats=x.size, axis=0
-        )
+            def evaluate_at(self, x: Union[float, np.ndarray]) -> np.ndarray:
+                """Returns thickness distribution points at the supplied ``x``.
+                Args:
+                    x: Chord-line fractions (0 = LE, 1 = TE), length n
+                Returns:
+                    np.ndarray: Thickness distribution points at x, with shape (n, 2)
+                """
+                x = ensure_1d_vector(x)
+                pts_t = np.zeros((x.size, 2))
+                pts_t[:, 0] = x
+                pts_t[:, 1] = self.half_thickness_at(x) * 2
+                return pts_t
 
-        # Localizing inputs for speed and clarity
-        m = self.max_camber
-        p = self.camber_location
+            def __call__(self, x: Union[float, np.ndarray]) -> np.ndarray:
+                return self.evaluate_at(x)
 
-        if self.cambered:
-            fwd, aft = x <= p, x > p  # Indices before and after max ordinate
-            t_c[fwd, 1] = (2 * m / p ** 2) * (p - x[fwd])
-            t_c[aft, 1] = (2 * m / (1 - p) ** 2) * (p - x[aft])
-
-        return normalize_2d(t_c, inplace=True)
-
-    def camber_normal_at(self, x: Union[float, np.ndarray]) -> np.ndarray:
-        """Returns the camber-line normal vector at supplied ``x``.
-
-        Note:
-            This method implements a fast 2D Affine Transform.
-        """
-        return rotate_2d_90ccw(self.camber_tangent_at(x))
-
-    def upper_surface_at(self, x: np.ndarray) -> np.ndarray:
-        """Returns upper surface points at the supplied ``x``."""
-        return self.camber_at(x) + self.offset_vectors_at(x)
-
-    def lower_surface_at(self, x: np.ndarray) -> np.ndarray:
-        """Returns lower surface points at the supplied ``x``."""
-        return self.camber_at(x) - self.offset_vectors_at(x)
+        return ThicknessDistribution(self.max_thickness, self.te_closed)
 
     def offset_vectors_at(self, x: np.ndarray) -> np.ndarray:
         """Returns half-thickness magnitude vectors at ``x``."""
-        n_c = self.camber_normal_at(x)  # Camber normal-vectors
-        y_t = self.half_thickness_at(x)  # Half thicknesses
+        n_c = self.naca_camber_curve.normal_at(x)  # Camber normal-vectors
+        y_t = self.naca_thickness_distribution.half_thickness_at(x)  # Half thicknesses
         return np.multiply(n_c, y_t.reshape(x.size, 1), out=n_c)
-
-    def half_thickness_at(self, x: np.ndarray) -> np.ndarray:
-        """Calculates the NACA-4 series 'Half-Thickness' y_t at ``x``.
-
-        Args:
-            x: Chord-line fraction (0 = LE, 1 = TE)
-        """
-        x = self.ensure_1d_vector(x)
-        return (self.max_thickness / 0.2) * (
-            0.2969 * np.sqrt(x)
-            - 0.1260 * x
-            - 0.3516 * (x ** 2)
-            + 0.2843 * (x ** 3)
-            - (0.1036 if self.te_closed else 0.1015) * (x ** 4)
-        )
 
     def plot(self, *args, show: bool = True, **kwargs):
         """Specializes the :py:class:`Airfoil` plot with a title."""
@@ -1521,7 +1571,7 @@ class NACA4Airfoil(AirfoilBase):
         )
 
     @staticmethod
-    def parse_naca_code(naca_code: str) -> map:
+    def parse_naca_code(naca_code: str) -> Tuple[float, float, float]:
         """Parses a ``naca_code`` into the 3 (scaled) values needed:
         max camber, max camber location, and maximum thickness.
 
@@ -1548,54 +1598,44 @@ class NACA4Airfoil(AirfoilBase):
             raise ValueError("NACA code must contain 4 numbers")
 
     # For compatibility, individual curves are also represented as splines
-    # @cached_property
+    @cached_property
     def upper_surface(self) -> ParametricCurve:
         """Returns the upper surface curve of the airfoil as Bspline."""
+        x = cosine_spacing(0, 1, num=200)
         return BSpline2D(
-            np.column_stack([
-                x := cosine_spacing(0, 1, num=200),
-                self.upper_surface_at(x)
-            ])
+            self.camber_line.evaluate_at(x) + self.offset_vectors_at(x)
         )
 
-    # @cached_property
+    @cached_property
     def lower_surface(self) -> ParametricCurve:
         """Returns the lower surface curve of the airfoil as Bspline."""
+        x = cosine_spacing(0, 1, num=200)
         return BSpline2D(
-            np.column_stack([
-                x := cosine_spacing(0, 1, num=200),
-                self.lower_surface_at(x)
-            ])
+            self.camber_line.evaluate_at(x) - self.offset_vectors_at(x)
         )
 
-    # @cached_property
+    @cached_property
     def surface(self)-> ParametricCurve:
         x = cosine_spacing(0, 1, num=200)
         return BSpline2D(
             np.vstack([
-                np.column_stack([ x, self.upper_surface_at(x)])[::-1],
-                np.column_stack([ x, self.lower_surface_at(x)])[1:]
+                (self.camber_line.evaluate_at(x) + self.offset_vectors_at(x))[::-1],
+                (self.camber_line.evaluate_at(x) - self.offset_vectors_at(x))[1:]
             ])
         )
 
-    # @cached_property
+    @cached_property
     def camber_line(self) -> ParametricCurve:
         """Returns the camber line curve of the airfoil as Bspline."""
         return BSpline2D(
-            np.column_stack([
-                x := cosine_spacing(0, 1, num=200),
-                self.camber_at(x)[:, 1]
-            ])
+            self.naca_camber_curve.evaluate_at(cosine_spacing(0, 1, num=200))
         )
 
-    # @cached_property
+    @cached_property
     def thickness_distribution(self) -> ParametricCurve:
         """Returns the thickness distribution curve of the airfoil as Bspline."""
         return BSpline2D(
-            np.column_stack([
-                x := cosine_spacing(0, 1, num=200),
-                self.thickness_at(x)
-            ])
+            self.naca_thickness_distribution.evaluate_at(cosine_spacing(0, 1, num=200))
         )
 
 

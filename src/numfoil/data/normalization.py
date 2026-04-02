@@ -47,11 +47,11 @@ class AirfoilNormalizer:
         # breakpoint() # ! reconsider... please...
         if points.ndim != 2 or points.shape[-1] != 2:
             raise ValueError("Input points must be a 2D array with shape (N, 2).")
-        points = cls._fill_data_gaps(points)
-        spline = cls._fix_trailing_edge(BSpline2D(points))
-        leading_edge, trailing_edge, _ = cls._find_leading_trailing_edges(spline)
-        scale, translation, rotation = cls._compute_transformation(leading_edge, trailing_edge)
-        return cls._apply_transformation(points, scale, translation, rotation).T
+        points = cls.fill_data_gaps(points)
+        spline = cls.fix_trailing_edge(BSpline2D(points))
+        leading_edge, trailing_edge, _ = cls.find_leading_trailing_edges(spline)
+        scale, translation, rotation = cls.compute_normalization_transformation(leading_edge, trailing_edge)
+        return cls.apply_transformation(points, scale, translation, rotation).T
 
     @classmethod
     def normalized_bspline(cls, data: np.ndarray | BSpline2D) -> BSpline2D:
@@ -72,17 +72,17 @@ class AirfoilNormalizer:
                 raise ValueError(
                     "Input points must be a 2D array with shape (N, 2)"
                 )
-            points = cls._remove_consecutive_duplicates(data)
-            points = cls._fill_data_gaps(points)
+            points = cls.remove_consecutive_duplicates(data)
+            points = cls.fill_data_gaps(points)
             data = BSpline2D(points)
 
         if not isinstance(data, BSpline2D):
             raise TypeError("Input must be a numpy array or BSpline2D.")
 
-        return cls._normalize_spline(data)
+        return cls.normalize_spline(data)
 
     @classmethod
-    def _normalize_spline(cls, spline: BSpline2D) -> BSpline2D:
+    def normalize_spline(cls, spline: BSpline2D) -> BSpline2D:
         """Normalizes a BSpline2D airfoil spline.
 
         Args:
@@ -91,22 +91,22 @@ class AirfoilNormalizer:
             BSpline2D: The normalized airfoil spline with transformation metadata.
         """
         # first fix potential trailing edge issues
-        spline = cls._fix_trailing_edge(spline)
+        spline = cls.fix_trailing_edge(spline)
 
         # get the transformation parameters
-        leading_edge, trailing_edge, u_leading_edge = cls._find_leading_trailing_edges(spline)
-        scale, translation, rotation = cls._compute_transformation(leading_edge, trailing_edge)
+        leading_edge, trailing_edge, u_leading_edge = cls.find_leading_trailing_edges(spline)
+        scale, translation, rotation = cls.compute_normalization_transformation(leading_edge, trailing_edge)
 
         # apply the transformation to the spline control points
-        spline.spline[1] = cls._apply_transformation(
+        spline.spline[1] = cls.apply_transformation(
             spline.spline[1], scale, translation, rotation
         )
 
         # ensure the trailing edge is correct after rotation
-        spline = cls._force_trailing_edge_at_x1(spline, target="1")
+        spline = cls.force_trailing_edge_at_x1(spline, target="1")
 
         # recompute
-        leading_edge, trailing_edge, u_leading_edge = cls._find_leading_trailing_edges(spline)
+        leading_edge, trailing_edge, u_leading_edge = cls.find_leading_trailing_edges(spline)
 
         # append additional information
         spline.leading_edge = leading_edge
@@ -115,7 +115,7 @@ class AirfoilNormalizer:
         return spline
 
     @staticmethod
-    def _apply_transformation(points: np.ndarray, scale: float, translation: np.ndarray, rotation: np.ndarray | float) -> np.ndarray:
+    def apply_transformation(points: np.ndarray, scale: float, translation: np.ndarray, rotation: np.ndarray | float) -> np.ndarray:
         """Applies the transformation to an array of points.
         Args:
             points (np.ndarray): The points to be transformed.
@@ -147,7 +147,7 @@ class AirfoilNormalizer:
         )
 
     @staticmethod
-    def _remove_consecutive_duplicates(points: np.ndarray) -> np.ndarray:
+    def remove_consecutive_duplicates(points: np.ndarray) -> np.ndarray:
         """Removes consecutive duplicate points from the array."""
         # # this one checks for exact duplicates
         # diff = np.diff(points, axis=0)
@@ -164,12 +164,12 @@ class AirfoilNormalizer:
         return points[mask]
 
     @staticmethod
-    def _remove_overshoots(points: np.ndarray) -> np.ndarray:
+    def remove_overshoots(points: np.ndarray) -> np.ndarray:
         """Removes points that are outside the range x=[0, 1]."""
         return points[(points[:, 0] >= 0) & (points[:, 0] <= 1)]
 
     @classmethod
-    def _fill_data_gaps(cls, points: np.ndarray, gap_threshold: float = 0.15) -> np.ndarray:
+    def fill_data_gaps(cls, points: np.ndarray, gap_threshold: float = 0.15) -> np.ndarray:
         """Detect and fill large gaps in airfoil coordinate data with
         interpolated points.
 
@@ -289,11 +289,11 @@ class AirfoilNormalizer:
     @classmethod
     def _trailing_edge(cls, spline: BSpline2D,) -> tuple[np.ndarray, np.ndarray]:
         """The simplest possible trailing edge finder: midpoint of endpoints.
-        This assumes `_fix_trailing_edge()` has already been called."""
+        This assumes `fix_trailing_edge()` has already been called."""
         return 0.5 * (spline.evaluate_at(0) + spline.evaluate_at(1))
 
     @classmethod
-    def _fix_trailing_edge(cls, spline: BSpline2D,) -> tuple[np.ndarray, np.ndarray]:
+    def fix_trailing_edge(cls, spline: BSpline2D,) -> tuple[np.ndarray, np.ndarray]:
         """Finds the trailing edge of the airfoil splines with problematic data.
 
         This method accounts for airfoil data in the following cases:
@@ -329,7 +329,7 @@ class AirfoilNormalizer:
         # # **Simple Case**: Skip detection
         # if not find_trailing_edge:
         #     # endpoints define trailing edge after forcing x-alignment
-        #     spline = cls._force_trailing_edge_at_x1(spline, target="xmax")
+        #     spline = cls.force_trailing_edge_at_x1(spline, target="xmax")
         #     trailing_edge = 0.5 * (spline.evaluate_at(0) + spline.evaluate_at(1))
         #     return trailing_edge
 
@@ -361,12 +361,12 @@ class AirfoilNormalizer:
                 missing (a) datapoint(s). As a dirty fix, the spline is
                 extended to x=1 by translating the respective endpoint."""
                 # # first fix the trailing edge
-                # spline = cls._force_trailing_edge_at_x1(spline, target="xmax")
+                # spline = cls.force_trailing_edge_at_x1(spline, target="xmax")
                 # # at this point, the trailing edge should be fine, but imma
                 # # check anyway because trust isssues
                 # assert np.allclose(spline.evaluate_at(0)[0], spline.evaluate_at(1)[0], rtol=0), \
                 #     "trailing edge does not match for upper and lower surface."
-                pass  # ! _force_trailing_edge_at_x1 always called before final return
+                pass  # ! force_trailing_edge_at_x1 always called before final return
 
         # **Case 2: Overshoot with symmetric trailing edge**
         # ! this case might be redundant now, already covered in case 3
@@ -460,7 +460,7 @@ class AirfoilNormalizer:
                     lower_aft_pt,
                 ) = cls._get_key_locations(spline)
 
-        spline = cls._force_trailing_edge_at_x1(spline, target="xmax")
+        spline = cls.force_trailing_edge_at_x1(spline, target="xmax")
         return spline
 
 
@@ -482,7 +482,7 @@ class AirfoilNormalizer:
         spline_start, spline_end = spline.control_points[0], spline.control_points[-1]
         upper_aft_pt, lower_aft_pt = spline.evaluate_at(res1.x[0]), spline.evaluate_at(res2.x[0])
         trailing_edge = AirfoilNormalizer._trailing_edge(spline)
-        leading_edge = AirfoilNormalizer._find_leading_edge(spline, trailing_edge=trailing_edge)[0]
+        leading_edge = AirfoilNormalizer.find_leading_edge(spline, trailing_edge=trailing_edge)[0]
 
         fig, (ax_le_zoom, ax, ax_te_zoom) = plt.subplots(
             1, 3, figsize=(15, 6), gridspec_kw={"width_ratios": [4, 7, 4]},
@@ -570,7 +570,7 @@ class AirfoilNormalizer:
         return fig, (ax_le_zoom, ax, ax_te_zoom)
 
     @staticmethod
-    def _force_trailing_edge_at_x1(spline: BSpline2D, target: str = "xmax"):
+    def force_trailing_edge_at_x1(spline: BSpline2D, target: str = "xmax"):
         """
         Forces the trailing edge of the spline to be at x=1. This is done by
         adjusting the last control point to match the x-coordinate of the
@@ -705,7 +705,7 @@ class AirfoilNormalizer:
         return spline
 
     @staticmethod
-    def _find_leading_edge(spline: BSpline2D, trailing_edge: Point2D) -> tuple[np.ndarray, np.ndarray]:
+    def find_leading_edge(spline: BSpline2D, trailing_edge: Point2D) -> tuple[np.ndarray, np.ndarray]:
         """
         Finds the leading edge of the airfoil by maximizing the distance from
         the trailing edge. This is done by minimizing the negative L2 norm of
@@ -730,7 +730,7 @@ class AirfoilNormalizer:
         return spline.evaluate_at(res.x[0]), res.x[0]
 
     @classmethod
-    def _find_leading_trailing_edges(cls, spline: BSpline2D,) -> tuple[np.ndarray, np.ndarray, float]:
+    def find_leading_trailing_edges(cls, spline: BSpline2D,) -> tuple[np.ndarray, np.ndarray, float]:
         """
         Simply combines the two methods for leading and trailing edge in
         a single function. just for convenience.
@@ -747,11 +747,11 @@ class AirfoilNormalizer:
                 at which the leading edge occurs.
         """
         trailing_edge = cls._trailing_edge(spline)
-        leading_edge, u_leading_edge = cls._find_leading_edge(spline, trailing_edge)
+        leading_edge, u_leading_edge = cls.find_leading_edge(spline, trailing_edge)
         return leading_edge, trailing_edge, u_leading_edge
 
     @staticmethod
-    def _compute_transformation(leading_edge, trailing_edge):
+    def compute_normalization_transformation(leading_edge, trailing_edge):
         chord = trailing_edge - leading_edge
         scale = 1.0 / np.linalg.norm(chord)
         translation = -leading_edge[:, np.newaxis]

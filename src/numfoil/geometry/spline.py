@@ -15,6 +15,7 @@ from .geom2d import normalize_2d, rotate_2d_90ccw, Point2D, Geom2D
 from ..util import cosine_spacing, chebyshev_nodes, ensure_1d_vector
 # from .data import NormalizedAirfoilCoordinates
 
+
 class Curve(ABC):
     """Abstract base class for curve definitions.
 
@@ -101,7 +102,6 @@ class Curve(ABC):
         plt.show(block=False)
         return fig, ax
 
-
     # @staticmethod
     # def arc_lengths(points: np.ndarray, normalize: bool = True) -> np.ndarray:
     #     """
@@ -170,7 +170,7 @@ class ParametricCurve(Curve, ABC):
         if self.spline[2] != self.n_control_points - 1:
             raise ValueError(
                 "Degree and number of control points do not match."
-                )
+            )
         return self.spline[2]
 
     @property
@@ -189,7 +189,7 @@ class ParametricCurve(Curve, ABC):
             method: str = "L2_norm",
             verbose: bool = False,
             guess: Optional[np.ndarray] = None,
-        ) -> float:
+    ) -> float:
         """Find the parameter value ``u`` of the location on the curve closest
         to a given point ``(x, y)``.
 
@@ -212,7 +212,7 @@ class ParametricCurve(Curve, ABC):
             opt.OptimizeResult: The full optimization result.
         """
         points = np.atleast_2d(points)
-        init_guess = guess or np.array([0.5]*len(points))
+        init_guess = guess or np.array([0.5] * len(points))
 
         def objective(u):
             residuals = points - self.evaluate_at(u)
@@ -234,13 +234,13 @@ class ParametricCurve(Curve, ABC):
                 result = opt.least_squares(
                     objective, init_guess,
                     bounds=(np.zeros(len(points)), np.ones(len(points))),
-                    )
+                )
             case "L2_norm":
                 result = opt.minimize(
                     objective, init_guess,
                     bounds=[(0., 1)]*len(points),
                     # method="SLSQP"
-                    )
+                )
             case _:
                 raise ValueError(
                     "Invalid method. Use 'least_squares' or 'L2_norm'."
@@ -251,7 +251,7 @@ class ParametricCurve(Curve, ABC):
         if not result.success:
             raise ValueError(
                 "failed to find u, optimization success {result.success}"
-                )
+            )
         return result.x
 
 
