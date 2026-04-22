@@ -131,6 +131,49 @@ class Vector2D(Geom2D):
         return normalize_2d(self)
 
 
+class Angle(float):
+    """Angle scalar with unit metadata, stored internally as radians."""
+
+    __slots__ = ("unit",)
+
+    def __new__(cls, value: float, unit: str = "rad"):
+        u = cls._normalize_unit(unit)
+        radians_value = float(value) if u == "rad" else float(np.deg2rad(value))
+        obj = super().__new__(cls, radians_value)
+        obj.unit = u
+        return obj
+
+    @staticmethod
+    def _normalize_unit(unit: str) -> str:
+        u = str(unit).strip().lower()
+        if u in ("rad", "radian", "radians"):
+            return "rad"
+        if u in ("deg", "degree", "degrees"):
+            return "deg"
+        raise ValueError("unit must be 'rad' or 'deg'")
+
+    def to_rad(self) -> "Angle":
+        """Return a new Angle displayed in radians."""
+        return Angle(float(self), "rad")
+
+    def to_degree(self) -> "Angle":
+        """Return a new Angle displayed in degrees."""
+        return Angle(np.rad2deg(float(self)), "deg")
+
+    def __call__(self) -> float:
+        """Return value in the current display unit."""
+        return float(np.rad2deg(float(self))) if self.unit == "deg" else float(self)
+
+    def unit_vector(self) -> Vector2D:
+        """Return [cos(theta), sin(theta)] using internal radians."""
+        theta = float(self)
+        return Vector2D([np.cos(theta), np.sin(theta)])
+
+    def __repr__(self) -> str:
+        return f"Angle({self()}, '{self.unit}')"
+
+
+
 R_90CCW_MATRIX = np.array([[0, 1], [-1, 0]])
 
 

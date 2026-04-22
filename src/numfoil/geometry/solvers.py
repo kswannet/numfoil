@@ -155,3 +155,153 @@ def solve_normal_offset_decomposition(
         "n_samples": int(n_samples),
     }
     return camber_curve, thickness_curve, diagnostics
+
+
+def solve_normal_offset_cst(
+    self,
+    n_coefficients: int = 8,
+    n_samples: int = 300,
+    max_nfev: int = 300,
+    loss: str = "soft_l1",
+    f_scale: float = 1e-3,
+):
+    """
+    Fit camber/thickness CST curves so that normal-offset reconstruction matches
+    this airfoil's upper/lower surfaces as closely as possible.
+
+    Returns:
+        tuple[CSTCurve, CSTCurve, dict]:
+            camber_curve, thickness_curve, diagnostics
+    """
+    import numpy as np
+    import scipy.optimize as opt
+
+    from .spline import CSTCurve
+    from ..util import cosine_spacing
+
+    # Chordwise stations for fitting.
+    x = cosine_spacing(0.0, 1.0, num=n_samples)
+
+    # Target surfaces as y(x). These are already available on AirfoilBase.
+    y_u_target = self.upper_surface_at(x)
+    y_l_target = self.lower_surface_at(x)
+
+    # Vertical initialization (very stable starting point).
+    y_c0 = 0.5 * (y_u_target + y_l_target)
+    t0 = np.maximum(y_u_target - y_l_target, 1e-6)
+
+    camber0 = CSTCurve.fit(
+        np.column_stack([x, y_c0]),
+        num_coefficients=n_coefficients,
+        n1=1.0,  # avoids LE derivative singularity in camber
+        n2=1.0,
+    )
+    thick0 = CSTCurve.fit(
+        np.column_stack([x, t0]),
+        num_coefficients=n_coefficients,
+        n1=0.5,
+        n2=1.0,
+    )
+
+    p0 = np.concatenate([camber0.coefficients, thick0.coefficients])
+
+    # Residual weights (tune as needed).
+    w_data = 1.0
+    w_pos = 50.0
+    w_smooth = 1e-3
+    w_te = 20.0
+
+    x_eval = np.clip(x, 1e-8, 1.0 - 1e-8)
+
+    def residuals(p: np.ndarray) -> np.ndarray:
+        c_coef = p[:n_coefficients]
+        t_coef = p[n_coefficients:]
+
+        camber = CSTCurve(c_coef, n1=1.0, n2=1.0)
+        thickness = CSTCurve(t_coef, n1=0.5, n2=1.0)
+
+        y_c = camber(x_eval)
+        dyc_dx = camber.first_deriv_at(x_eval)
+
+        # Unit camber normal n = (-dy, 1) / sqrt(1+dy^2)
+        denom = np.sqrt(1.0 + dyc_dx**2)
+        nx = -dyc_dx / denom
+        ny = 1.0 / denom
+
+        t_full = thickness(x_eval)
+        t_half = 0.5 * t_full
+
+        # Normal-offset reconstruction
+        x_u = np.clip(x_eval + nx * t_half, 0.0, 1.0)
+        y_u = y_c + ny * t_half
+
+        x_l = np.clip(x_eval - nx * t_half, 0.0, 1.0)
+        y_l = y_c - ny * t_half
+
+        # Compare reconstructed y against target surfaces at reconstructed x
+        r_data = np.concatenate([
+            y_u - self.upper_surface_at(x_u),
+            y_l - self.lower_surface_at(x_l),
+        ]) * w_data
+
+        # Soft positivity constraint: thickness >= 0
+        neg_t = np.minimum(0.0, t_full)
+        r_pos = w_pos * neg_t
+
+        # Mild smoothness on coefficients (2nd finite diff)
+        d2c = np.diff(c_coef, n=2)
+        d2t = np.diff(t_coef, n=2)
+        r_smooth = w_smooth * np.concatenate([d2c, d2t])
+
+        # Optional TE consistency (shared x at trailing edge)
+        r_te = w_te * np.array([
+            x_u[-1] - 1.0,
+            x_l[-1] - 1.0,
+        ])
+
+        return np.concatenate([r_data, r_pos, r_smooth, r_te])
+
+    result = opt.least_squares(
+        residuals,
+        p0,
+        loss=loss,
+        f_scale=f_scale,
+        max_nfev=max_nfev,
+        verbose=0,
+    )
+
+    c_opt = result.x[:n_coefficients]
+    t_opt = result.x[n_coefficients:]
+
+    camber_curve = CSTCurve(c_opt, n1=1.0, n2=1.0)
+    thickness_curve = CSTCurve(t_opt, n1=0.5, n2=1.0)
+
+    # Diagnostics on fit grid
+    y_c = camber_curve(x_eval)
+    dy = camber_curve.first_deriv_at(x_eval)
+    denom = np.sqrt(1.0 + dy**2)
+    nx = -dy / denom
+    ny = 1.0 / denom
+    t_half = 0.5 * thickness_curve(x_eval)
+
+    x_u = np.clip(x_eval + nx * t_half, 0.0, 1.0)
+    y_u = y_c + ny * t_half
+    x_l = np.clip(x_eval - nx * t_half, 0.0, 1.0)
+    y_l = y_c - ny * t_half
+
+    yu_err = y_u - self.upper_surface_at(x_u)
+    yl_err = y_l - self.lower_surface_at(x_l)
+
+    info = {
+        "success": bool(result.success),
+        "status": int(result.status),
+        "message": result.message,
+        "cost": float(result.cost),
+        "nfev": int(result.nfev),
+        "rmse_upper": float(np.sqrt(np.mean(yu_err**2))),
+        "rmse_lower": float(np.sqrt(np.mean(yl_err**2))),
+        "max_abs_upper": float(np.max(np.abs(yu_err))),
+        "max_abs_lower": float(np.max(np.abs(yl_err))),
+    }
+
+    return camber_curve, thickness_curve, info
