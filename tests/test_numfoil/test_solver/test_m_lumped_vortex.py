@@ -17,7 +17,7 @@ import math
 import numpy as np
 import pytest
 
-from numfoil.solver.m_lumped_vortex import calc_lumped_vortex_im, vortex_2d
+from numfoil.aero.vortex_panel.m_lumped_vortex import calc_lumped_vortex_im, vortex_2d
 
 VORTEX_2D_TEST_CASES = {
     "argnames": "gamma, vortex_pt, col_pt, expected_result",

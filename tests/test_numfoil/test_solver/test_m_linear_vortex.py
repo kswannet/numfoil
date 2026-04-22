@@ -18,8 +18,8 @@ import numpy as np
 import pytest
 
 from numfoil.geometry import NACA4Airfoil, Panel2D
-from numfoil.solver.base import PanelMethod
-from numfoil.solver.m_linear_vortex import (
+from numfoil.aero.vortex_panel.base import PanelMethod
+from numfoil.aero.vortex_panel.m_linear_vortex import (
     calc_integration_constants,
     calc_linear_vortex_im,
     calc_vortex_coefficients,

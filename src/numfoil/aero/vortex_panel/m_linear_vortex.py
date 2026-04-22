@@ -22,7 +22,7 @@ import numba
 import numpy as np
 
 from numfoil.geometry import Panel2D
-from numfoil.solver.base import (
+from numfoil.aero.vortex_panel.base import (
     BASE_NUMBA_CONFIG,
     PanelMethod,
     ThickFlowSolution,
