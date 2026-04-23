@@ -21,7 +21,13 @@ from numfoil.geometry.spline import (
     Bezier, SplevCBezier, SplevBezier,
     CSTCurve, KulfanModifiedCST, CSTAirfoilSurface,
 )
-from .geom2d import Point2D, Vector2D, normalize_2d, rotate_2d_90ccw
+from .geom2d import (
+    GeometricMoments2D,
+    Point2D,
+    Vector2D,
+    normalize_2d,
+    rotate_2d_90ccw,
+)
 
 
 from scipy.special import comb
@@ -168,6 +174,8 @@ class AirfoilBase(ABC):
     @cached_property
     def max_thickness(self) -> Tuple[float, float]:
         """Finds and returns the location and value of maximum thickness.
+        Uses optimization for exact solution, stored as a cached property so it
+        only needs to run once.
 
         Returns:
             Tuple[float, float]: (x location, thickness value)
@@ -208,11 +216,22 @@ class AirfoilBase(ABC):
 
     @cached_property
     def area(self) -> float:
-        """Calculates the area of the airfoil."""
+        """Calculates the approximate area of the airfoil.
+        For a more accurate solution, call the area property of `geometric_moments`.
+        """
         x = cosine_spacing(0, 1, num=1000)
         t = self.thickness_at(x)
         return np.trapezoid(t, x)
         # return spi.simpson(t, x)
+
+    @cached_property
+    def geometric_moments(self) -> GeometricMoments2D:
+        """Cached geometric moments computed from the closed airfoil contour.
+
+        Returns:
+            GeometricMoments2D: Reusable moment container for area descriptors.
+        """
+        return GeometricMoments2D.from_polygon(self.points, max_total_order=4)
 
     @cached_property
     def leading_edge_radius(self) -> np.ndarray:
@@ -228,7 +247,7 @@ class AirfoilBase(ABC):
         if not result.success:
             print(result)
             raise RuntimeError("Failed to find upper crest.")
-        return self.surface.evaluate_at(result.x[0])
+        return self.upper_surface.evaluate_at(result.x[0])
 
     @cached_property
     def lower_crest(self) -> np.ndarray:
@@ -2338,19 +2357,15 @@ class KulfanAirfoil(AirfoilBase):
 
     @property
     def area(self) -> float:
-        """Compute cross-sectional area by integrating thickness.
+        """Return the enclosed airfoil area from base polygon moments.
 
-        Math:
-            A = integral_0^1 t(x) dx
-
-        Args:
-            None.
+        This override keeps the Kulfan-specific API location while delegating
+        to the shared geometric-moment implementation in :class:`AirfoilBase`.
 
         Returns:
-            float: Approximate sectional area.
+            float: Positive enclosed area, units length^2.
         """
-        x = np.linspace(0.0, 1.0, 1000)
-        return float(np.trapezoid(self.thickness_at(x), x))
+        return float(super().area)
 
     def _validate_thickness(self) -> bool:
         """Check sampled thickness non-negativity.
