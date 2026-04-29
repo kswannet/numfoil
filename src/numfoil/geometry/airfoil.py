@@ -7,22 +7,24 @@ import scipy.optimize as opt
 import scipy.integrate as spi
 
 from functools import cached_property
-from typing import Union, Tuple
+from typing import Union, Tuple, Optional, Literal
 from abc import ABCMeta, abstractmethod, ABC
 from  warnings import warn as warning
 
-from ..data.datafile import AirfoilDataFile
-from ..data.normalization import AirfoilNormalizer
-from ..util import cosine_spacing, chebyshev_nodes, ensure_1d_vector, selig
-from .spline import (
+from numfoil.data.datafile import AirfoilDataFile
+from numfoil.data.normalization import AirfoilNormalizer
+from numfoil.util import cosine_spacing, chebyshev_nodes, ensure_1d_vector, selig
+from numfoil.geometry.spline import (
     Curve,
     ParametricCurve,
     BSpline2D,
     Bezier, SplevCBezier, SplevBezier,
-    CSTCurve, CSTAirfoilSurface,
+    CSTCurve, KulfanModifiedCST, CSTAirfoilSurface,
 )
-from .geom2d import Point2D, normalize_2d, rotate_2d_90ccw
+from .geom2d import Point2D, Vector2D, normalize_2d, rotate_2d_90ccw
 
+
+from scipy.special import comb
 
 AIRFOIL_REPR_REGEX = re.compile(r"[.]([A-Z])\w+")
 EPS = 1e-12
@@ -259,7 +261,7 @@ class AirfoilBase(ABC):
         )
 
     @cached_property
-    def trailing_edge_gap(self) -> float:
+    def trailing_edge_thickness(self) -> float:
         """Returns the gap between the upper and lower surfaces at the trailing edge."""
         return np.abs(
             self.upper_surface_at(1) - self.lower_surface_at(1)
@@ -275,22 +277,22 @@ class AirfoilBase(ABC):
     @cached_property
     def trailing_edge_upper_vector(self) -> np.ndarray:
         """Upper surface gradient at the trailing edge."""
-        return self.upper_surface.first_deriv_at(1 - EPS)
+        return self.upper_surface.first_deriv_at(1 - EPS).view(Vector2D)
 
     @cached_property
     def trailing_edge_lower_vector(self) -> np.ndarray:
         """Lower surface gradient at the trailing edge."""
-        return self.lower_surface.first_deriv_at(1 - EPS)
+        return self.lower_surface.first_deriv_at(1 - EPS).view(Vector2D)
 
     @cached_property
     def trailing_edge_vector(self) -> np.ndarray:
         """Vector between the upper and lower surface at the trailing edge."""
-        return self.camber_line.tangent_at(1 - EPS)[0]
+        return self.camber_line.tangent_at(1 - EPS)[0].view(Vector2D)
 
     @cached_property
     def leading_edge_vector(self) -> np.ndarray:
         """Vector between the upper and lower surface at the leading edge."""
-        return self.camber_line.first_deriv_at(0 + EPS)
+        return self.camber_line.first_deriv_at(0 + EPS).view(Vector2D)
 
     @cached_property
     def trailing_edge_wedge_angle(self) -> float:
@@ -345,6 +347,46 @@ class AirfoilBase(ABC):
         if show:
             plt.show()
         return fig, ax
+
+    ###############################
+    ### Aliases for convenience ###
+    ###############################
+
+    @property
+    def t_max(self):
+        return self.max_thickness
+
+    @property
+    def c_max(self):
+        return self.max_camber
+
+    @property
+    def r_le(self):
+        return self.leading_edge_radius
+
+    @property
+    def z_u(self):
+        return self.upper_crest
+
+    @property
+    def z_l(self):
+        return self.lower_crest
+
+    @property
+    def k_z_u(self):
+        return self.upper_crest_curvature
+
+    @property
+    def k_z_l(self):
+        return self.lower_crest_curvature
+
+    @property
+    def t_te(self):
+        return self.trailing_edge_thickness
+
+    @property
+    def trailing_edge_gap(self):
+        return self.trailing_edge_thickness
 
 
 
@@ -1226,27 +1268,491 @@ class BezierAirfoil(AirfoilBase):
         return SplevBezier(thickness_control_points)
 
 
-class CSTAirfoil(AirfoilBase):
+class KulfanAirfoil(AirfoilBase):
+    """Represent one Kulfan/CST airfoil with NumPy-only curve models.
+
+    This class is the single-airfoil (non-batched) counterpart to the torch
+    implementation and stores one upper and one lower `KulfanModifiedCST`
+    surface that share the LE/TE modifiers.
+
+    Math:
+        y_u(x) = y_cst,u(x) + w_le * x * (1-x)^{n+0.5} + t_te * x / 2
+        y_l(x) = y_cst,l(x) + w_le * x * (1-x)^{n+0.5} - t_te * x / 2
+
+    Parameter layout:
+        [upper_coeffs | lower_coeffs | le_weight | te_thickness]
+
+    Args:
+        upper_surface (KulfanModifiedCST): Upper Kulfan-modified CST curve.
+        lower_surface (KulfanModifiedCST): Lower Kulfan-modified CST curve.
+        name (str): Short airfoil label.
+        description (str): Optional long description.
+
+    Returns:
+        None: Class is initialized in place.
+
+    Attributes:
+        upper_surface (KulfanModifiedCST): Upper surface curve object.
+        lower_surface (KulfanModifiedCST): Lower surface curve object.
+        name (str): Short airfoil label.
+        description (str): Optional long description.
+        full_name (str): Full airfoil name, typically from description or name.
+        data_points (np.ndarray | None):
+            Optional array of raw data points used for fitting.
+
+    Methods:
+        from_tensor: Class method to build from flat parameter vector.
+        from_kulfan_params: Class method to build from Kulfan parameters.
+        ...
+    """
+
     def __init__(
         self,
-        upper_coeficients: np.ndarray,
-        lower_coeficients: np.ndarray,
-        leading_edge_weight: float = 0.0,
-        trailing_edge_weight: float = 0.0,
-        trialing_edge_thickness: float = 0.0,
-        data_points: np.ndarray = None,
-        name: str = None,
-        full_name: str = None,
-        normalize: bool = True,
+        upper_surface: KulfanModifiedCST,
+        lower_surface: KulfanModifiedCST,
+        name: str = "",
+        description: str = "",
     ):
-        # the original input points, mainly for reference
-        self.data_points = data_points
-        # the data points after processing, used for fitting
+        """Initialize a single Kulfan airfoil object.
 
-        # the shortened name of the airfoil, usually the filename
+        The constructor only accepts fully formed upper/lower surface objects
+        and validates consistency of shared parameters.
+
+        Math:
+            Shared constraints: n1_u = n1_l, n2_u = n2_l,
+            w_le,u = w_le,l, t_te,u = t_te,l
+
+        Args:
+            upper_surface (KulfanModifiedCST): Upper surface model.
+            lower_surface (KulfanModifiedCST): Lower surface model.
+            name (str): Airfoil short name.
+            description (str): Optional textual description.
+
+        Returns:
+            None: Attributes are stored on the instance.
+        """
+        self._upper_surface = upper_surface
+        self._lower_surface = lower_surface
         self.name = name
-        # the full name of the airfoil, usually from the file header
-        self.full_name = full_name or name
+        self.description = name if description is None else description
+        self.full_name = self.description or name
+        self.data_points = None
+
+        self.eps = max(self._upper_surface.eps, self._lower_surface.eps)
+        self._validate_curves()
+
+    def _validate_curves(self) -> None:
+        """Validate upper/lower surface compatibility for one airfoil.
+
+        This guard ensures both surfaces are structurally consistent and use the
+        expected orientation convention (upper positive, lower negative near LE).
+
+        Math:
+            K_u = K_l,
+            n1_u = n1_l,
+            n2_u = n2_l,
+            w_le,u = w_le,l,
+            t_te,u = t_te,l
+
+        Args:
+            None.
+
+        Returns:
+            None: Raises on incompatibility.
+        """
+        if self._upper_surface.n_coefficients != self._lower_surface.n_coefficients:
+            # this is probably not strictly necessary, but good to be consistent
+            raise ValueError(
+                "Upper and lower surfaces must use the same number of coefficients"
+            )
+        if self._upper_surface.surface_type != "upper":
+            raise ValueError("upper_surface.surface_type must be 'upper'")
+        if self._lower_surface.surface_type != "lower":
+            raise ValueError("lower_surface.surface_type must be 'lower'")
+
+        if not self._upper_surface.n1 == self._lower_surface.n1:
+            raise ValueError("Upper and lower surfaces must share n1 exponent")
+        if not self._upper_surface.n2 == self._lower_surface.n2:
+            raise ValueError("Upper and lower surfaces must share n2 exponent")
+
+        if not np.isclose(
+            self._upper_surface.leading_edge_weight,
+            self._lower_surface.leading_edge_weight,
+            rtol=1e-8,
+            atol=1e-10,
+        ):
+            raise ValueError("Upper/lower surfaces must share leading-edge weight")
+
+        if not np.isclose(
+            self._upper_surface.trailing_edge_thickness,
+            self._lower_surface.trailing_edge_thickness,
+            rtol=1e-8,
+            atol=1e-10,
+        ):
+            raise ValueError("Upper/lower surfaces must share trailing-edge thickness")
+
+    @classmethod
+    def from_tensor(
+        cls,
+        parameters: np.ndarray,
+        name: str = "",
+        description: str = "",
+        n1: float = 0.5,
+        n2: float = 1.0,
+    ) -> "KulfanAirfoil":
+        """Build an airfoil from a flattened Kulfan parameter vector.
+
+        Math:
+            len(p) = 2K + 2
+            p = [a_u(0..K-1), a_l(0..K-1), w_le, t_te]
+
+        Args:
+            parameters (np.ndarray): Flat vector of shape [2K + 2].
+            name (str): Airfoil short name.
+            description (str): Optional textual description.
+            n1 (float): Leading-edge class exponent.
+            n2 (float): Trailing-edge class exponent.
+
+        Returns:
+            KulfanAirfoil: Instantiated single-airfoil object.
+        """
+        params = np.asarray(parameters, dtype=float).reshape(-1)
+        if params.size < 4:
+            raise ValueError("Need at least 4 parameters: [u, l, w_le, t_te]")
+        if params.size % 2 != 0:
+            raise ValueError("Parameter length must be even: 2*n_coeff + 2")
+
+        n_coeffs = (params.size - 2) // 2
+        upper_coeffs = params[:n_coeffs]
+        lower_coeffs = params[n_coeffs:-2]
+        w_le = float(params[-2])
+        t_te = float(params[-1])
+
+        return cls.from_kulfan_params(
+            upper_coeffs=upper_coeffs,
+            lower_coeffs=lower_coeffs,
+            w_le=w_le,
+            t_te=t_te,
+            n1=n1,
+            n2=n2,
+            name=name,
+            description=description,
+        )
+
+    @classmethod
+    def from_kulfan_params(
+        cls,
+        upper_coeffs: np.ndarray,
+        lower_coeffs: np.ndarray,
+        w_le: float = 0.0,
+        t_te: float = 0.0,
+        n1: float = 0.5,
+        n2: float = 1.0,
+        name: str = "",
+        description: str = "",
+    ) -> "KulfanAirfoil":
+        """Build an airfoil from explicit upper/lower Kulfan parameters.
+        This is the more verbose, keyword-argument version of `from_tensor`.
+
+        Math:
+            y_u uses +t_te*x/2,
+            y_l uses -t_te*x/2,
+            both share the same w_le and t_te.
+
+        Args:
+            upper_coeffs (np.ndarray): Upper CST coefficients [K].
+            lower_coeffs (np.ndarray): Lower CST coefficients [K].
+            w_le (float): Leading-edge modifier weight.
+            t_te (float): Trailing-edge thickness magnitude.
+            n1 (float): Leading-edge class exponent.
+            n2 (float): Trailing-edge class exponent.
+            name (str): Airfoil short name.
+            description (str): Optional textual description.
+
+        Returns:
+            KulfanAirfoil: Instantiated airfoil object.
+        """
+        upper_curve = KulfanModifiedCST(
+            coefficients=np.asarray(upper_coeffs, dtype=float).reshape(-1),
+            leading_edge_weight=float(w_le),
+            trailing_edge_thickness=float(abs(t_te)),
+            surface_type="upper",
+            n1=n1,
+            n2=n2,
+        )
+        lower_curve = KulfanModifiedCST(
+            coefficients=np.asarray(lower_coeffs, dtype=float).reshape(-1),
+            leading_edge_weight=float(w_le),
+            trailing_edge_thickness=float(abs(t_te)),
+            surface_type="lower",
+            n1=n1,
+            n2=n2,
+        )
+        return cls(
+            upper_surface=upper_curve,
+            lower_surface=lower_curve,
+            name=name,
+            description=description,
+        )
+
+    @classmethod
+    def from_points(
+        cls,
+        upper_points: np.ndarray,
+        lower_points: np.ndarray,
+        n_coefficients: int = 8,
+        *,
+        trailing_edge_solution: Literal["fit", "data"] = "data",
+        n1: float = 0.5,
+        n2: float = 1.0,
+        name: str = "",
+        description: str = "",
+    ) -> "KulfanAirfoil":
+        """Fit and construct an airfoil from separate upper/lower coordinates.
+
+        This convenience constructor forwards to `fit` with identical
+        parameters.
+
+        Math:
+            p* = argmin_p ||y_u(x) - y_u,data||_2 + ||y_l(x) - y_l,data||_2
+
+        Args:
+            upper_points (np.ndarray): Upper surface points [N_u, 2].
+            lower_points (np.ndarray): Lower surface points [N_l, 2].
+            n_coefficients (int): Coefficients per side.
+            trailing_edge_solution (Literal["fit", "data"]): TE strategy.
+            n1 (float): Leading-edge class exponent.
+            n2 (float): Trailing-edge class exponent.
+            name (str): Airfoil short name.
+            description (str): Optional textual description.
+
+        Returns:
+            KulfanAirfoil: Fitted airfoil object.
+        """
+        return cls.fit(
+            upper_points=upper_points,
+            lower_points=lower_points,
+            n_coefficients=n_coefficients,
+            trailing_edge_solution=trailing_edge_solution,
+            n1=n1,
+            n2=n2,
+            name=name,
+            description=description,
+        )
+
+    @classmethod
+    def fit(
+        cls,
+        upper_points: np.ndarray,
+        lower_points: np.ndarray,
+        n_coefficients: int = 8,
+        *,
+        use_kulfan_modifiers: bool = True,
+        trailing_edge_solution: Literal["fit", "data"] = "data",
+        n1: float = 0.5,
+        n2: float = 1.0,
+        name: str = "",
+        description: str = "",
+        rcond: Optional[float] = None,
+    ) -> "KulfanAirfoil":
+        """Jointly fit upper/lower Kulfan-CST surfaces to point clouds.
+
+        The solve is linear in unknown coefficients and optional Kulfan
+        modifiers. With shared modifiers enabled, a block system is assembled
+        for both surfaces.
+
+        Math:
+            M theta = y
+            theta = [a_u, a_l, w_le, t_te]  (fit mode)
+            theta = [a_u, a_l, w_le]         (data TE mode)
+
+        Args:
+            upper_points (np.ndarray): Upper points [N_u, 2].
+            lower_points (np.ndarray): Lower points [N_l, 2].
+            n_coefficients (int): Number of coefficients per side.
+            use_kulfan_modifiers (bool): If True, fit LE/TE modifiers.
+            trailing_edge_solution (Literal["fit", "data"]): TE strategy.
+            n1 (float): Leading-edge class exponent.
+            n2 (float): Trailing-edge class exponent.
+            name (str): Airfoil short name.
+            description (str): Optional textual description.
+            rcond (Optional[float]): Least-squares cutoff.
+
+        Returns:
+            KulfanAirfoil: Fitted airfoil object.
+        """
+        upper_points = np.asarray(upper_points, dtype=float)
+        lower_points = np.asarray(lower_points, dtype=float)
+
+        if upper_points.ndim != 2 or upper_points.shape[1] != 2:
+            raise ValueError("upper_points must have shape [N, 2]")
+        if lower_points.ndim != 2 or lower_points.shape[1] != 2:
+            raise ValueError("lower_points must have shape [N, 2]")
+        if trailing_edge_solution not in ("fit", "data"):
+            raise ValueError("trailing_edge_solution must be 'fit' or 'data'")
+
+        min_samples = n_coefficients + (2 if use_kulfan_modifiers else 0)
+        if upper_points.shape[0] < min_samples or lower_points.shape[0] < min_samples:
+            raise ValueError(
+                f"Need at least {min_samples} points per side for this fit"
+            )
+
+        x_upper = upper_points[:, 0]
+        y_upper = upper_points[:, 1]
+        x_lower = lower_points[:, 0]
+        y_lower = lower_points[:, 1]
+
+        if np.any((x_upper < 0.0) | (x_upper > 1.0)):
+            raise ValueError("upper_points x coordinates must be in [0, 1]")
+        if np.any((x_lower < 0.0) | (x_lower > 1.0)):
+            raise ValueError("lower_points x coordinates must be in [0, 1]")
+
+        eps = np.finfo(float).eps
+        x_upper = np.clip(x_upper, eps, 1.0 - eps)
+        x_lower = np.clip(x_lower, eps, 1.0 - eps)
+
+        k = np.arange(n_coefficients, dtype=float)
+        n = n_coefficients - 1
+        binom = comb(n, k)
+
+        # Matrix formulation of the CST basis functions for upper surfaces
+        Cx_upper = np.power(x_upper, n1) * np.power(1.0 - x_upper, n2)
+        Bx_upper = np.power(x_upper[:, None], k) * np.power(
+            1.0 - x_upper[:, None],
+            n - k,
+        )
+        Mx_upper = Cx_upper[:, None] * Bx_upper * binom
+
+        # Matrix formulation of the CST basis functions for lower surfaces
+        Cx_lower = np.power(x_lower, n1) * np.power(1.0 - x_lower, n2)
+        Bx_lower = np.power(x_lower[:, None], k) * np.power(
+            1.0 - x_lower[:, None],
+            n - k,
+        )
+        Mx_lower = Cx_lower[:, None] * Bx_lower * binom
+
+        # Add columns for Kulfan modifiers to solve the combined system.
+        # Upper and lower curve must be fit simultaneously to solve for shared
+        # modifier parameters, which must be identical for both sides.
+        if use_kulfan_modifiers:
+            le_mod_upper = x_upper * np.power(1.0 - x_upper, n + 0.5)
+            le_mod_lower = x_lower * np.power(1.0 - x_lower, n + 0.5)
+
+            te_mod_upper = x_upper / 2.0
+            te_mod_lower = -x_lower / 2.0
+
+            if trailing_edge_solution == "data":
+                te_thickness = max(float(y_upper[-1] - y_lower[-1]), 0.0)
+                y_upper_target = y_upper - te_mod_upper * te_thickness
+                y_lower_target = y_lower - te_mod_lower * te_thickness
+            else:
+                te_thickness = None
+                y_upper_target = y_upper
+                y_lower_target = y_lower
+
+            zeros_upper = np.zeros((x_upper.size, n_coefficients))
+            zeros_lower = np.zeros((x_lower.size, n_coefficients))
+
+            M_upper = np.hstack(
+                [
+                    Mx_upper,
+                    zeros_upper,
+                    le_mod_upper[:, None],
+                ]
+            )
+            M_lower = np.hstack(
+                [
+                    zeros_lower,
+                    Mx_lower,
+                    le_mod_lower[:, None],
+                ]
+            )
+
+            if trailing_edge_solution == "fit":
+                M_upper = np.hstack([M_upper, te_mod_upper[:, None]])
+                M_lower = np.hstack([M_lower, te_mod_lower[:, None]])
+
+            M = np.vstack([M_upper, M_lower])
+            y = np.concatenate([y_upper_target, y_lower_target])
+            solution, *_ = np.linalg.lstsq(M, y, rcond=rcond)
+
+            upper_coeffs = solution[:n_coefficients]
+            lower_coeffs = solution[n_coefficients : 2 * n_coefficients]
+
+            if trailing_edge_solution == "fit":
+                le_weight = float(solution[-2])
+                te_thickness = max(float(solution[-1]), 0.0)
+            else:
+                le_weight = float(solution[-1])
+                te_thickness = float(te_thickness)
+
+            upper_coeffs[0] = max(upper_coeffs[0], eps)
+            lower_coeffs[0] = min(lower_coeffs[0], -eps)
+
+            upper_curve = KulfanModifiedCST(
+                coefficients=upper_coeffs,
+                leading_edge_weight=le_weight,
+                trailing_edge_thickness=te_thickness,
+                surface_type="upper",
+                n1=n1,
+                n2=n2,
+            )
+            lower_curve = KulfanModifiedCST(
+                coefficients=lower_coeffs,
+                leading_edge_weight=le_weight,
+                trailing_edge_thickness=te_thickness,
+                surface_type="lower",
+                n1=n1,
+                n2=n2,
+            )
+        # else, if the vanilla version is used without modifiers, just use the
+        # standard CST fit for upper and lower surfaces separately. These are
+        # then turned into modified curves with the modifiers set to 0. There is
+        # no real reason for this conversion apart from potential compatibility
+        # issues, but the curve itself remains the same.
+        else:
+            upper_base = CSTCurve.fit(
+                upper_points,
+                num_coefficients=n_coefficients,
+                n1=n1,
+                n2=n2,
+                rcond=rcond,
+            )
+            lower_base = CSTCurve.fit(
+                lower_points,
+                num_coefficients=n_coefficients,
+                n1=n1,
+                n2=n2,
+                rcond=rcond,
+            )
+            upper_base.coefficients[0] = max(upper_base.coefficients[0], eps)
+            lower_base.coefficients[0] = min(lower_base.coefficients[0], -eps)
+
+            upper_curve = KulfanModifiedCST(
+                coefficients=upper_base.coefficients,
+                leading_edge_weight=0.0,
+                trailing_edge_thickness=0.0,
+                surface_type="upper",
+                n1=n1,
+                n2=n2,
+            )
+            lower_curve = KulfanModifiedCST(
+                coefficients=lower_base.coefficients,
+                leading_edge_weight=0.0,
+                trailing_edge_thickness=0.0,
+                surface_type="lower",
+                n1=n1,
+                n2=n2,
+            )
+
+        airfoil = cls(
+            upper_surface=upper_curve,
+            lower_surface=lower_curve,
+            name=name,
+            description=description,
+        )
+        airfoil.data_points = np.vstack([upper_points[::-1], lower_points[1:]])
+        return airfoil
 
     @classmethod
     def from_coordinate_array(
@@ -1255,40 +1761,59 @@ class CSTAirfoil(AirfoilBase):
         normalize: bool = True,
         name: str = "",
         description: str = "",
-    ):
-        """Creates an Airfoil object from an array of points.
-        Mainly used for input validation.
+        n_coefficients: int = 8,
+        trailing_edge_solution: Literal["fit", "data"] = "data",
+        n1: float = 0.5,
+        n2: float = 1.0,
+    ) -> "KulfanAirfoil":
+        """Fit a Kulfan airfoil from full airfoil coordinates.
+
+        The method optionally normalizes the airfoil (Default: True), splits at
+        the leading edge, and then performs upper/lower fitting.
+
+        Math:
+            full points -> (upper, lower) -> fit upper/lower Kulfan surfaces
 
         Args:
-            points (np.ndarray): Array of airfoil points.
-
-        Raises:
-            TypeError: Input must be a numpy array.
-            ValueError: Invalid shape for input array.
+            points (np.ndarray): Full airfoil points [N, 2]. normalize (bool):
+            If True, normalize and re-sample before fitting. name (str): Airfoil
+            short name. description (str): Optional textual description.
+            n_coefficients (int): Number of coefficients per side.
+            trailing_edge_solution (Literal["fit", "data"]): TE strategy. n1
+            (float): Leading-edge class exponent. n2 (float): Trailing-edge
+            class exponent.
 
         Returns:
-            Airfoil: Airfoil object initialized with input
+            KulfanAirfoil: Fitted airfoil object.
         """
-        if not isinstance(points, np.ndarray):
-            raise TypeError("Input must be a numpy array.")
-        if points.shape[1] != 2:
-            raise ValueError("Input array must have shape (n, 2).")
+        pts = np.asarray(points, dtype=float)
+        if pts.ndim != 2 or pts.shape[1] != 2:
+            raise ValueError("points must have shape [N, 2]")
 
         if normalize:
-            points = AirfoilNormalizer.normalize_points(points).T#, find_trailing_edge=True).T
-            # make sure the leading edge is included in the normalized
-            # points. this should not alter the curve in any way, as the
-            # origin should part of it after normalization. This simply adds
-            # a point on the curve, or moves one along it.
-            if len(points) % 2 == 1:
-                points[len(points) // 2] = np.array([0.0, 0.0])
-            elif len(points) % 2 == 0:
-                np.insert(points, len(points) // 2, [0.0, 0.0], axis=0)
+            spline = AirfoilNormalizer.normalized_bspline(pts)
+            u_le = spline.u_leading_edge
+            upper_points = spline.evaluate_at(np.linspace(0.0, u_le, 200))[::-1]
+            lower_points = spline.evaluate_at(np.linspace(u_le, 1.0, 200))
+        else:
+            le_idx = int(np.argmin(pts[:, 0]))
+            if le_idx <= 0 or le_idx >= len(pts) - 1:
+                raise ValueError("Could not split points into upper/lower surfaces")
+            upper_points = pts[: le_idx + 1][::-1]
+            lower_points = pts[le_idx:]
 
-        return cls(
-            data_points=points,
-            name=name
+        airfoil = cls.fit(
+            upper_points=upper_points.round(6),
+            lower_points=lower_points.round(6),
+            n_coefficients=n_coefficients,
+            trailing_edge_solution=trailing_edge_solution,
+            n1=n1,
+            n2=n2,
+            name=name,
+            description=description,
         )
+        airfoil.data_points = pts
+        return airfoil
 
     @classmethod
     def from_file(
@@ -1296,100 +1821,640 @@ class CSTAirfoil(AirfoilBase):
         filepath: str,
         normalize: bool = True,
         data_type: str = "coordinates",
-        **kwargs: dict
-    ):
-        """Returns an Airfoil object from a data file.
-        Coordinates are normalized before passing to the Airfoil object.
+        **kwargs: dict,
+    ) -> "KulfanAirfoil":
+        """Create a Kulfan airfoil from an airfoil data file.
 
-        Includes setting the name and full name of the airfoil based on the
-        filename and header, respectively.
+        This method reads coordinates with `AirfoilDataFile` and delegates to
+        `from_coordinate_array`.
+
+        Math:
+            file -> points -> optional normalization -> Kulfan fit
 
         Args:
-            filepath (str): path to the data file.
+            filepath (str): Path to input airfoil file.
+            normalize (bool): Whether to normalize before fitting.
+            data_type (str): Only "coordinates" is supported.
+            **kwargs (dict): Extra keyword arguments forwarded to fitting.
 
         Returns:
-            Airfoil: Airfoil object initialized with data from file.
+            KulfanAirfoil: Fitted airfoil object from file data.
         """
-        datafile = AirfoilDataFile(filepath)
-        match data_type:
-            case "coordinates":
-                return cls.from_coordinate_array(
-                    datafile.points,
-                    name=datafile.filename,
-                    description=datafile.header,
-                    normalize=normalize,
-                    **kwargs
-                )
-            case "control_points":
-                return cls.from_control_points(
-                    datafile.points,
-                    name=datafile.filename,
-                    description=datafile.header,
-                    **kwargs,
-                )
-            case _:
-                raise ValueError(f"Unknown data type: {data_type}")
+        if data_type != "coordinates":
+            raise ValueError("KulfanAirfoil only supports data_type='coordinates'")
 
-    # TODO add option for other curve types
-    @cached_property
+        data = AirfoilDataFile(filepath)
+        return cls.from_coordinate_array(
+            data.points,
+            normalize=normalize,
+            name=data.filename,
+            description=data.header,
+            **kwargs,
+        )
+
+    @property
+    def upper_surface(self) -> KulfanModifiedCST:
+        """Return the upper Kulfan-modified CST surface.
+
+        Math:
+            y_u(x) = upper_surface(x)
+
+        Args:
+            None.
+
+        Returns:
+            KulfanModifiedCST: Upper surface model.
+        """
+        return self._upper_surface
+
+    @property
+    def lower_surface(self) -> KulfanModifiedCST:
+        """Return the lower Kulfan-modified CST surface.
+
+        Math:
+            y_l(x) = lower_surface(x)
+
+        Args:
+            None.
+
+        Returns:
+            KulfanModifiedCST: Lower surface model.
+        """
+        return self._lower_surface
+
+    @property
+    def parameters(self) -> np.ndarray:
+        """Return flattened Kulfan parameter vector for this airfoil.
+
+        Math:
+            p = [a_u, a_l, w_le, t_te]
+
+        Args:
+            None.
+
+        Returns:
+            np.ndarray: Flat parameter vector with shape [2K + 2].
+        """
+        return np.concatenate(
+            [
+                self.upper_surface.coefficients,
+                self.lower_surface.coefficients,
+                np.array(
+                    [
+                        self.upper_surface.leading_edge_weight,
+                        self.upper_surface.trailing_edge_thickness,
+                    ]
+                ),
+            ]
+        )
+
+    params = parameters
+
+    @property
+    def batch_size(self) -> int:
+        """Return pseudo-batch size for API compatibility.
+
+        This NumPy class represents one airfoil only.
+
+        Math:
+            B = 1
+
+        Args:
+            None.
+
+        Returns:
+            int: Always 1.
+        """
+        return 1
+
+    @property
+    def is_batched(self) -> bool:
+        """Indicate whether multiple airfoils are represented.
+
+        Math:
+            is_batched = (B > 1)
+
+        Args:
+            None.
+
+        Returns:
+            bool: Always False for this class.
+        """
+        return False
+
+    def __len__(self) -> int:
+        """Return number of represented airfoils.
+
+        Math:
+            len(self) = 1
+
+        Args:
+            None.
+
+        Returns:
+            int: Always 1.
+        """
+        return 1
+
+    def evaluate_at(self, x: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Evaluate upper and lower ordinates at chord locations x.
+
+        This follows the geometry-module convention of exposing an explicit
+        `evaluate_at` method rather than a torch-style `forward` entry point.
+
+        Math:
+            y_u = upper_surface.evaluate_at(x)[:, 1]
+            y_l = lower_surface.evaluate_at(x)[:, 1]
+
+        Args:
+            x (np.ndarray): Chordwise locations in [0, 1], shape [N].
+
+        Returns:
+            Tuple[np.ndarray, np.ndarray]: (y_upper, y_lower), each shape [N].
+        """
+        x = ensure_1d_vector(x)
+        if np.any((x < 0.0) | (x > 1.0)):
+            raise ValueError("x must be in [0, 1]")
+        y_upper = self.upper_surface.evaluate_at(x)[:, 1]
+        y_lower = self.lower_surface.evaluate_at(x)[:, 1]
+        return y_upper, y_lower
+
+    def coordinates_at(self, x: np.ndarray, dtype=np.float64) -> np.ndarray:
+        """Return Selig-format coordinates sampled at x locations.
+
+        The order is TE->LE on the upper side and LE->TE on the lower side,
+        excluding duplicate leading-edge point.
+
+        Math:
+            P = [ (x, y_u)[::-1], (x, y_l)[1:] ]
+
+        Args:
+            x (np.ndarray): Chordwise locations in [0, 1], shape [N].
+            dtype (np.dtype): Output floating dtype.
+
+        Returns:
+            np.ndarray: Coordinates with shape [2N-1, 2].
+        """
+        x = ensure_1d_vector(x)
+        y_upper, y_lower = self.evaluate_at(x)
+        return np.vstack(
+            [
+                np.column_stack([x, y_upper])[::-1],
+                np.column_stack([x, y_lower])[1:],
+            ]
+        ).astype(dtype).view(Point2D)
+
+    @property
+    def points(self) -> np.ndarray:
+        """Return default cosine-sampled Selig-format coordinates.
+
+        Uses 100 points per side (199 total after LE de-duplication).
+
+        Math:
+            x_i = cosine_spacing(0, 1, 100)
+            points = coordinates_at(x_i)
+
+        Args:
+            None.
+
+        Returns:
+            np.ndarray: Coordinate array with shape [199, 2].
+        """
+        return self.coordinates_at(cosine_spacing(0, 1, num=100), dtype=np.float64)
+
+    def upper_surface_at(self, x: np.ndarray) -> np.ndarray:
+        """Evaluate upper surface ordinate values at x.
+
+        Math:
+            y_u(x) = upper_surface(x)
+
+        Args:
+            x (np.ndarray): Chordwise locations in [0, 1].
+
+        Returns:
+            np.ndarray: Upper ordinates with shape [N].
+        """
+        x = ensure_1d_vector(x)
+        return self.upper_surface.evaluate_at(x)[:, 1]
+
+    def lower_surface_at(self, x: np.ndarray) -> np.ndarray:
+        """Evaluate lower surface ordinate values at x.
+
+        Math:
+            y_l(x) = lower_surface(x)
+
+        Args:
+            x (np.ndarray): Chordwise locations in [0, 1].
+
+        Returns:
+            np.ndarray: Lower ordinates with shape [N].
+        """
+        x = ensure_1d_vector(x)
+        return self.lower_surface.evaluate_at(x)[:, 1]
+
+    @property
     def surface(self) -> CSTAirfoilSurface:
-        """Construct the surface spline of the airfoil."""
-        return CSTAirfoilSurface.fit(self.surface_points)
+        """Return compatibility perimeter wrapper around both surfaces.
 
-    @cached_property
-    def trailing_edge(self) -> np.ndarray:
-        """Returns the [x,y] coordinate of the trailing edge.
-
-        Trailing edge is taken as the midpoint between surface spline ends.
-
-        Returns:
-            np.ndarray: The [x,y] coordinate of the trailing edge.
-        """
-        return 0.5*(self.surface.evaluate_at(0) + self.surface.evaluate_at(1))
-
-
-    @cached_property
-    def upper_surface(self) -> CSTCurve:
-        return self.surface.upper_part
-
-    @cached_property
-    def lower_surface(self) -> CSTCurve:
-        return self.surface.lower_part
-
-    @cached_property
-    def upper_surface_at(self) -> si.PchipInterpolator:
-        """Interpolator for upper surface spline.
-        Returns upper airfoil ordinates at the supplied ``x``.
+        Math:
+            surface(u) switches between y_u and y_l via x(u)=|1-2u|
 
         Args:
-            x (float, np.ndarray): Chord-line fraction (0 = LE, 1 = TE)
+            None.
 
         Returns:
-            interpolator results: upper surface y ordinate at x.
+            CSTAirfoilSurface: Parametric wrapper object.
         """
-        return self.upper_surface.evaluate_at
+        return CSTAirfoilSurface(self.upper_surface, self.lower_surface)
 
-    @cached_property
-    def lower_surface_at(self) -> si.PchipInterpolator:
-        """Interpolator for upper surface spline.
-        Returns upper airfoil ordinates at the supplied ``x``.
+    def thickness_at(self, x: np.ndarray) -> np.ndarray:
+        """Compute thickness distribution at x.
+
+        Math:
+            t(x) = y_u(x) - y_l(x)
 
         Args:
-            x (float, np.ndarray): Chord-line fraction (0 = LE, 1 = TE)
+            x (np.ndarray): Chordwise locations in [0, 1].
 
         Returns:
-            interpolator results: upper surface y ordinate at x.
+            np.ndarray: Thickness values with shape [N].
         """
-        return self.lower_surface.evaluate_at
+        y_upper, y_lower = self.evaluate_at(x)
+        return y_upper - y_lower
 
-    @cached_property
-    def camber_line(self) -> si.PchipInterpolator:
-        """Returns the interpolator for the camber line."""
-        x = np.linspace(0, 1, 500)
-        y_upper = self.upper_surface(x)
-        y_lower = self.lower_surface(x)
-        camber = 0.5 * (y_upper + y_lower)
-        return CSTCurve.fit(camber, num_coefficients=6, n1=1.0, n2=1.0,)
+    def camber_at(self, x: np.ndarray) -> np.ndarray:
+        """Compute camber line ordinate at x.
+
+        Math:
+            c(x) = (y_u(x) + y_l(x)) / 2
+
+        Args:
+            x (np.ndarray): Chordwise locations in [0, 1].
+
+        Returns:
+            np.ndarray: Camber values with shape [N].
+        """
+        y_upper, y_lower = self.evaluate_at(x)
+        return 0.5 * (y_upper + y_lower)
+
+    @property
+    def thickness_distribution(self) -> KulfanModifiedCST:
+        """Fit a single-surface Kulfan curve to thickness data.
+
+        Thickness is always non-negative in nominal airfoils, so the fitted
+        helper curve is treated as an "upper" surface convention.
+
+        Math:
+            t(x) = y_u(x) - y_l(x)
+            fit KulfanModifiedCST to [x, t(x)]
+
+        Args:
+            None.
+
+        Returns:
+            KulfanModifiedCST: Fitted thickness curve model.
+        """
+        x = cosine_spacing(0, 1, num=200)
+        thickness_points = np.column_stack([x, self.thickness_at(x)])
+        return KulfanModifiedCST.fit(
+            thickness_points,
+            n_coefficients=self.upper_surface.n_coefficients,
+            trailing_edge_solution="data",
+            surface_type="upper",
+            n1=self.upper_surface.n1,
+            n2=self.upper_surface.n2,
+        )
+
+    @property
+    def camber_line(self) -> CSTCurve:
+        """Fit a CST curve to sampled camber data.
+
+        A neutral class function (n1=n2=1) is used for smooth camber fitting.
+
+        Math:
+            c(x) = (y_u + y_l)/2
+            fit CSTCurve to [x, c(x)]
+
+        Args:
+            None.
+
+        Returns:
+            CSTCurve: Fitted camber-line curve.
+        """
+        x = cosine_spacing(0, 1, num=200)
+        camber_points = np.column_stack([x, self.camber_at(x)])
+        return CSTCurve.fit(
+            camber_points,
+            num_coefficients=self.upper_surface.n_coefficients,
+            n1=1.0,
+            n2=1.0,
+        )
+
+    @property
+    def max_thickness(self) -> Tuple[float, float]:
+        """Return maximum thickness and its x-location.
+
+        The maximum is found by dense sampling and argmax.
+
+        Math:
+            (t_max, x_t) = max_x t(x)
+
+        Args:
+            None.
+
+        Returns:
+            Tuple[float, float]: (t_max, x_at_t_max).
+        """
+        x = np.linspace(0.0, 1.0, 2000)
+        t = self.thickness_at(x)
+        idx = int(np.argmax(t))
+        return float(t[idx]), float(x[idx])
+
+    @property
+    def max_camber(self) -> Tuple[float, float]:
+        """Return signed maximum camber magnitude and its x-location.
+
+        The extremum is located by maximizing absolute camber and preserving
+        the sampled sign at that location.
+
+        Math:
+            x_c = argmax_x |c(x)|,
+            c_max = c(x_c)
+
+        Args:
+            None.
+
+        Returns:
+            Tuple[float, float]: (c_max_signed, x_at_c_max).
+        """
+        x = np.linspace(0.0, 1.0, 2000)
+        c = self.camber_at(x)
+        idx = int(np.argmax(np.abs(c)))
+        return float(c[idx]), float(x[idx])
+
+    @property
+    def leading_edge_radius(self) -> float:
+        """Estimate leading-edge radius from surface curvature.
+
+        The estimate averages upper/lower curvature magnitudes near x=0.
+
+        Math:
+            R_le ~ 1 / (0.5*(|kappa_u| + |kappa_l|))
+
+        Args:
+            None.
+
+        Returns:
+            float: Estimated leading-edge radius (inf for zero curvature).
+        """
+        x_le = np.array([1e-8])
+        kappa_u = abs(float(self.upper_surface.curvature_at(x_le)[0]))
+        kappa_l = abs(float(self.lower_surface.curvature_at(x_le)[0]))
+        kappa_avg = 0.5 * (kappa_u + kappa_l)
+        return np.inf if kappa_avg < self.eps else 1.0 / kappa_avg
+
+
+    @property
+    def trailing_edge_angle(self) -> float:
+        """Compute trailing-edge included angle in degrees.
+
+        Math:
+            theta_te = |atan(y'_u) - atan(y'_l)| * 180/pi
+
+        Args:
+            None.
+
+        Returns:
+            float: Trailing-edge angle in degrees.
+        """
+        x_te = np.array([0.99])
+        dy_upper = float(self.upper_surface.first_deriv_at(x_te)[0])
+        dy_lower = float(self.lower_surface.first_deriv_at(x_te)[0])
+        return abs(np.arctan(dy_upper) - np.arctan(dy_lower)) * 180.0 / np.pi
+
+    @property
+    def trailing_edge_thickness(self) -> float:
+        """Return trailing-edge thickness at x=1.
+
+        Math:
+            t_te = y_u(1) - y_l(1)
+
+        Args:
+            None.
+
+        Returns:
+            float: Trailing-edge thickness.
+        """
+        return float(self.thickness_at(np.array([1.0]))[0])
+
+    @property
+    def trailing_edge_wedge_angle(self) -> float:
+        """Compute wedge angle near the trailing edge in degrees.
+
+        This uses derivatives at x=1-eps to reduce endpoint singular effects.
+
+        Math:
+            gamma_te = |atan(y'_u) - atan(y'_l)| * 180/pi
+
+        Args:
+            None.
+
+        Returns:
+            float: Trailing-edge wedge angle in degrees.
+        """
+        x_te = np.array([1.0 - 1e-8])
+        dy_upper = float(self.upper_surface.first_deriv_at(x_te)[0])
+        dy_lower = float(self.lower_surface.first_deriv_at(x_te)[0])
+        return abs(np.arctan(dy_upper) - np.arctan(dy_lower)) * 180.0 / np.pi
+
+    @property
+    def upper_crest(self) -> Tuple[float, float]:
+        """Return upper crest location and ordinate.
+
+        The crest is approximated by dense sampling and argmax on upper y.
+
+        Math:
+            x_z_u = argmax_x y_u(x), y_z_u = y_u(x_z_u)
+
+        Args:
+            None.
+
+        Returns:
+            Tuple[float, float]: (x_crest, y_crest) for upper surface.
+        """
+        x = np.linspace(0.0, 1.0, 2000)
+        y = self.upper_surface_at(x)
+        idx = int(np.argmax(y))
+        return float(x[idx]), float(y[idx])
+
+    @property
+    def lower_crest(self) -> Tuple[float, float]:
+        """Return lower crest location and ordinate.
+
+        The crest is approximated by dense sampling and argmin on lower y.
+
+        Math:
+            x_z_l = argmin_x y_l(x), y_z_l = y_l(x_z_l)
+
+        Args:
+            None.
+
+        Returns:
+            Tuple[float, float]: (x_crest, y_crest) for lower surface.
+        """
+        x = np.linspace(0.0, 1.0, 2000)
+        y = self.lower_surface_at(x)
+        idx = int(np.argmin(y))
+        return float(x[idx]), float(y[idx])
+
+    @property
+    def upper_crest_curvature(self) -> float:
+        """Return curvature at the upper crest.
+
+        Math:
+            kappa_z_u = kappa_u(x_z_u)
+
+        Args:
+            None.
+
+        Returns:
+            float: Upper crest curvature.
+        """
+        x_crest, _ = self.upper_crest
+        return float(self.upper_surface.curvature_at(np.array([x_crest]))[0])
+
+    @property
+    def lower_crest_curvature(self) -> float:
+        """Return curvature at the lower crest.
+
+        Math:
+            kappa_z_l = kappa_l(x_z_l)
+
+        Args:
+            None.
+
+        Returns:
+            float: Lower crest curvature.
+        """
+        x_crest, _ = self.lower_crest
+        return float(self.lower_surface.curvature_at(np.array([x_crest]))[0])
+
+    @property
+    def area(self) -> float:
+        """Compute cross-sectional area by integrating thickness.
+
+        Math:
+            A = integral_0^1 t(x) dx
+
+        Args:
+            None.
+
+        Returns:
+            float: Approximate sectional area.
+        """
+        x = np.linspace(0.0, 1.0, 1000)
+        return float(np.trapezoid(self.thickness_at(x), x))
+
+    def _validate_thickness(self) -> bool:
+        """Check sampled thickness non-negativity.
+
+        The check uses cosine spacing to emphasize LE/TE resolution.
+
+        Math:
+            valid iff min_x t(x) >= 0 over sampled nodes
+
+        Args:
+            None.
+
+        Returns:
+            bool: True when sampled thickness is non-negative.
+        """
+        beta = np.linspace(0.0, np.pi, 512)
+        x = 0.5 * (1.0 - np.cos(beta))
+        return bool(np.all(self.thickness_at(x) >= 0.0))
+
+    def plot(
+        self,
+        title: Optional[str] = None,
+        num_points: int = 2000,
+        save_dir: Optional[str] = None,
+    ) -> Tuple[plt.Figure, plt.Axes]:
+        """Plot upper and lower Kulfan surfaces with parameter annotations.
+
+        A dense chordwise grid is used for visualization quality. The parameter
+        textbox displays fitted Kulfan coefficients and shared modifiers.
+
+        Math:
+            plot y_u(x), y_l(x) for x in [0, 1]
+
+        Args:
+            title (Optional[str]): Optional figure title.
+            num_points (int): Number of x samples for plotting.
+            save_dir (Optional[str]): Optional output image path.
+
+        Returns:
+            Tuple[plt.Figure, plt.Axes]: Matplotlib figure and axes objects.
+        """
+        x = np.linspace(0.0, 1.0, num_points)
+        y_upper, y_lower = self.evaluate_at(x)
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.plot(x, y_upper, "b-", label="Upper Kulfan Surface")
+        ax.plot(x, y_lower, "r-", label="Lower Kulfan Surface")
+        ax.set_title(title or "Kulfan Airfoil")
+        ax.set_xlabel("x/c")
+        ax.set_ylabel("y/c")
+        ax.set_aspect("equal", adjustable="box")
+        ax.grid(True)
+        ax.legend(loc="best")
+
+        upper_coeffs = np.round(self.upper_surface.coefficients, 4)
+        lower_coeffs = np.round(self.lower_surface.coefficients, 4)
+        w_le = self.upper_surface.leading_edge_weight
+        t_te = self.upper_surface.trailing_edge_thickness
+
+        row_fmt = "{:<14} " + " ".join(["{:>8.4f}"] * len(upper_coeffs))
+        text = (
+            row_fmt.format("Upper coeffs:", *upper_coeffs)
+            + "\n"
+            + row_fmt.format("Lower coeffs:", *lower_coeffs)
+            + "\n"
+            + f"{'LE weight:':<15} {w_le:>8.4f}\n"
+            + f"{'TE thickness:':<14} {t_te:>8.4f}"
+        )
+
+        plt.subplots_adjust(bottom=0.245, top=0.925)
+        plt.figtext(
+            0.1,
+            0.0275,
+            text,
+            fontsize=10,
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white"),
+            linespacing=1.5,
+        )
+
+        if save_dir is not None:
+            fig.savefig(save_dir)
+
+        return fig, ax
+
+
+class CSTAirfoil(KulfanAirfoil):
+    """Backward-compatible alias for the NumPy Kulfan airfoil implementation.
+
+    This class intentionally adds no behavior and exists only so legacy code
+    importing `CSTAirfoil` continues to function with the updated Kulfan/CST
+    representation.
+
+    Math:
+        CSTAirfoil == KulfanAirfoil
+
+    Args:
+        Same as `KulfanAirfoil`.
+
+    Returns:
+        KulfanAirfoil: Behaviorally identical instance.
+    """
 
 
 class NACA4Airfoil(AirfoilBase):

@@ -22,7 +22,7 @@ import numba
 import numpy as np
 
 from numfoil.geometry import Panel2D
-from numfoil.solver.base import BASE_NUMBA_CONFIG, PanelMethod
+from numfoil.aero.vortex_panel.base import BASE_NUMBA_CONFIG, PanelMethod
 
 # Great source explaining it
 # https://www.youtube.com/watch?v=Ai0o5ppUTuk

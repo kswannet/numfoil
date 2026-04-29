@@ -1555,147 +1555,332 @@ class SplevCBezier(BSpline2D):
 
 
 class CSTCurve(Curve):
-    """
-    A class representing a single-valued CST curve: y(x).
+    """Represent a single Class-Shape Transformation (CST) curve with NumPy.
 
-    The standard CST formulation for y(x) can be written as:
-        :math:`y(x) = C(x) * S(x)`
-    where
-        :math:`C(x) = x^n1 (1 - x)^n2`
-        :math:`S(x) = \sum_{k=0}^n \binom{n}{k} a_k x^k (1 - x)^{n-k}`
+    This class models a one-dimensional surface ordinate function y(x) on the
+    normalized chord interval x in [0, 1]. Stores one coefficient vector per
+    instance.
+
+    Math:
+        :math:`y(x) = C(x) * S(x)` :math:`C(x) = x^{n1} (1 - x)^{n2}`
+        :math:`S(x) = \sum_{k=0}^{n} a_k * \binom{n}{k} * x^k * (1 - x)^{n-k}`
 
     Args:
-        coefficients (list or array of floats):
-            The shape (Bernstein polynomial) coefficients a_k.
-
-        n1, n2 (float):
-            The exponents in the C(x) term.
-            Default values are n1 = 0.5, n2 = 1.0
-
-        verbose (bool):
-            Print optimization results.
-            Default is False.
-
-    Attributes:
-        n (int): Number of Bernstein terms.
-        k_vec (np.ndarray): Index vector for Bernstein polynomials.
-        binomial_weights (list): List of binomial coefficients.
+        coefficients (np.ndarray): Bernstein weights a_k with shape [K]. n1
+        (float): Leading-edge class exponent. n2 (float): Trailing-edge class
+        exponent.
     """
-    def __init__(self, coefficients: np.ndarray, n1: float = 0.5, n2: float = 1.0):
-        self.n1 = n1
-        self.n2 = n2
-        self.coefficients = np.array(coefficients, dtype=float)
 
-        # Polynomial degree (number of Bernstein terms)
-        self.degree = len(coefficients) - 1
-        # index vector for Bernstein polynomials
-        self.k_vec = np.arange(self.degree + 1)
+    def __init__(
+        self,
+        coefficients: np.ndarray,
+        n1: float = 0.5,
+        n2: float = 1.0,
+    ):
+        """Initialize a single-curve CST model.
 
-    def class_function(self, x: np.ndarray) -> np.ndarray:
-        """Class function for CST curve.
-        C(x) = x^n1 (1-x)^n2
+        The coefficient vector defines the Bernstein expansion order. The
+        polynomial degree is K - 1, where K is the number of coefficients.
 
-        :math:`C(x) = x^{n1} (1-x)^{n2}`
+        Math:
+            n = K - 1
+            k = [0, 1, ..., n]
 
         Args:
-            x (np.ndarray): Input array. shape (N,).
+            coefficients (np.ndarray): CST coefficients with shape [K].
+            n1 (float): Leading-edge class exponent in C(x).
+            n2 (float): Trailing-edge class exponent in C(x).
 
         Returns:
-            np.ndarray: Class function values. shape (N,)
+            None: Attributes are stored on the instance.
         """
-        return np.power(x, self.n1) * np.power(1.0 - x, self.n2)
+        coeffs = np.asarray(coefficients, dtype=float).reshape(-1)
+        if coeffs.ndim != 1 or coeffs.size < 1:
+            raise ValueError("coefficients must be a 1D array with at least one value")
+
+        self.n1 = float(n1)
+        self.n2 = float(n2)
+        self.coefficients = coeffs
+        self.k_vec = np.arange(self.n_coefficients, dtype=float)
+        self.eps = np.finfo(float).eps
+
+    @property
+    def n_coefficients(self) -> int:
+        """Return the number of CST coefficients.
+
+        This value equals the number of Bernstein basis weights in the shape
+        function.
+
+        Math:
+            K = len(a)
+
+        Args:
+            None.
+
+        Returns:
+            int: Number of coefficients K.
+        """
+        return int(self.coefficients.size)
+
+    @property
+    def degree(self) -> int:
+        """Return the Bernstein polynomial degree.
+
+        The CST shape function uses Bernstein basis of degree n = K - 1.
+
+        Math:
+            n = K - 1
+
+        Args:
+            None.
+
+        Returns:
+            int: Polynomial degree n.
+        """
+        return self.n_coefficients - 1
+
+    @property
+    def k(self) -> np.ndarray:
+        """Return the Bernstein index vector.
+
+        This is the vector of integer exponents used in x^k and (1-x)^{n-k}.
+
+        Math:
+            k = [0, 1, ..., n]
+
+        Args:
+            None.
+
+        Returns:
+            np.ndarray: Index vector of shape [K].
+        """
+        return self.k_vec
+
+    @property
+    def n(self) -> int:
+        """Alias for the Bernstein polynomial degree.
+
+        Math:
+            n = K - 1
+
+        Args:
+            None.
+
+        Returns:
+            int: Polynomial degree.
+        """
+        return self.degree
+
+    @property
+    def fitted_points(self) -> np.ndarray | None:
+        """Return points used during the last fit, if available.
+
+        This attribute is populated by `fit` to preserve the original data used
+        in least-squares reconstruction.
+
+        Math:
+            The stored matrix is [x_i, y_i] for i = 1..N.
+
+        Args:
+            None.
+
+        Returns:
+            np.ndarray | None: Array with shape [N, 2], or None if unset.
+        """
+        return getattr(self, "_fitted_points", None)
+
+    @staticmethod
+    def _ensure_1d(x: np.ndarray | float) -> np.ndarray:
+        """Convert scalar/array input into a one-dimensional NumPy array.
+
+        This helper enforces a uniform input layout for all evaluation methods.
+
+        Math:
+            scalar -> shape [1]
+            vector -> shape [N]
+
+        Args:
+            x (np.ndarray | float): Scalar or one-dimensional input.
+
+        Returns:
+            np.ndarray: One-dimensional float array.
+        """
+        arr = np.asarray(x, dtype=float)
+        if arr.ndim == 0:
+            return arr.reshape(1)
+        if arr.ndim == 1:
+            return arr
+        raise ValueError("Input x must be scalar or 1D array")
+
+    def _prepare_input(self, x: np.ndarray | float) -> np.ndarray:
+        """Validate and normalize chordwise input coordinates.
+
+        The CST formulation in this implementation is defined only for the
+        normalized chord interval [0, 1].
+
+        Math:
+            x in [0, 1]
+
+        Args:
+            x (np.ndarray | float): Chordwise location(s).
+
+        Returns:
+            np.ndarray: One-dimensional validated x array.
+        """
+        x = self._ensure_1d(x)
+        if np.any(x < 0.0) or np.any(x > 1.0):
+            raise ValueError("x must be in the range [0, 1]")
+        return x
 
     @cached_property
-    def binomial_weights(self):
-        """Precompute binomial coefficients for faster evaluation.
+    def binomial_weights(self) -> np.ndarray:
+        """Compute and cache binomial weights for Bernstein basis functions.
 
-        :math:`\binom{n}{k}`
+        The weights are reused across all evaluations, avoiding repeated
+        combinatorial computations.
 
-        Returns:
-            list: List of binomial coefficients.
-        """
-        return comb(self.degree, self.k_vec)
-
-    def bernstein_basis(self, x: np.ndarray) -> np.ndarray:
-        """Calculate the Bernstein polynomial.
-        B(x, n, k) = x^k (1 - x)^(n-k), where k is the current index.
-        vectorized this becomes:
-        B(x) = x^k (1 - x)^(n-k), where k = [0, 1, ..., n] is a vector.
-
-        :math:`B_{n,k}(x) = x^k (1 - x)^{n-k}`
+        Math:
+            w_k = binom(n, k), k = 0..n
 
         Args:
-            x (np.ndarray): Input array. Shape (N,).
+            None.
 
         Returns:
-            np.ndarray: Bernstein polynomial values.
-                Shape (N, n+1) where column k is B_k(x).
+            np.ndarray: Binomial coefficients with shape [K].
         """
-        x = np.array(x).reshape(-1, 1) # if np.array(x).ndim == 1 else x
-        return np.power(x, self.k_vec) * np.power(1.0 - x, self.degree - self.k_vec)
+        return comb(self.n, self.k)
 
-    def weighted_basis_matrix(self, x: np.ndarray) -> np.ndarray:
-        """Construct the weighted Bernstein Basis matrix.
+    def class_function(self, x: np.ndarray | float) -> np.ndarray:
+        """Evaluate the class function C(x).
 
-        :math:`M(x) = C(x) * B(x) * binom_coeffs`
+        The class function controls leading/trailing edge behavior independently
+        from the shape coefficients.
+
+        Math:
+            C(x) = x^{n1} (1 - x)^{n2}
 
         Args:
-            x (np.ndarray): Input array. Shape (N,).
+            x (np.ndarray | float): Chordwise location(s) in [0, 1].
 
         Returns:
-            np.ndarray: Bernstein Basis matrix. Shape (N, n+1)
+            np.ndarray: Class values with shape [N].
         """
-        x = np.array(x).reshape(-1, 1) # if np.array(x).ndim == 1 else x
+        x = self._prepare_input(x)
+        return np.power(x, self.n1) * np.power(1.0 - x, self.n2)
+
+    def bernstein_basis(self, x: np.ndarray | float) -> np.ndarray:
+        """Evaluate all Bernstein basis terms at x.
+
+        Math:
+            B_{n,k}(x) = x^k (1 - x)^{n-k}
+
+        Args:
+            x (np.ndarray | float): Chordwise location(s) in [0, 1].
+
+        Returns:
+            np.ndarray: Basis matrix with shape [N, K].
+        """
+        x = self._prepare_input(x)[:, None]
+        return np.power(x, self.k) * np.power(1.0 - x, self.n - self.k)
+
+    def weighted_basis_matrix(self, x: np.ndarray | float) -> np.ndarray:
+        """Build the full weighted CST design matrix.
+
+        This matrix multiplies directly with the coefficient vector to produce
+        y(x) in one linear algebra operation.
+
+        Math:
+            M(x) = C(x) * B(x) * binom(n, k)
+            y = M @ a
+
+        Args:
+            x (np.ndarray | float): Chordwise location(s) in [0, 1].
+
+        Returns:
+            np.ndarray: Weighted basis matrix with shape [N, K].
+        """
+        x_vec = self._prepare_input(x)
         return (
-            self.class_function(x)
-            * self.bernstein_basis(x)
+            self.class_function(x_vec)[:, None]
+            * self.bernstein_basis(x_vec)
             * self.binomial_weights
         )
 
-    def shape_function(self, x: np.ndarray) -> np.ndarray:
-        """
-        Shape function for CST curve.
+    def shape_function(self, x: np.ndarray | float) -> np.ndarray:
+        """Evaluate the CST shape function S(x).
 
-        :math:`S(x) = \sum_{k=0}^n a_k B_{n,k}(x)`
+        Math:
+            S(x) = sum_{k=0}^{n} a_k * binom(n,k) * B_{n,k}(x)
 
         Args:
-            x (np.ndarray): Input array.
+            x (np.ndarray | float): Chordwise location(s) in [0, 1].
 
         Returns:
-            np.ndarray: Shape function values.
+            np.ndarray: Shape-function values with shape [N].
         """
-        return np.sum(
-                self.coefficients
-                * self.binomial_weights
-                * self.bernstein_basis(x),
-            axis=-1,
-        )
+        basis = self.bernstein_basis(x)
+        return basis @ (self.coefficients * self.binomial_weights)
 
-    # Aliases
     C = class_function
     S = shape_function
     B = bernstein_basis
     M = weighted_basis_matrix
 
-    def evaluate_at(self, x: np.ndarray | float) -> Point2D:
-        """
-        Evaluate the CST curve at a given x in [0, 1].
-        """
-        if np.any(x < 0) or np.any(x > 1):
-            raise ValueError("x must be in the range [0, 1]")
+    def ordinate_at(self, x: np.ndarray | float) -> np.ndarray:
+        """Evaluate ordinate values y(x) as a 1D array.
 
-        y = self.class_function(x) * self.shape_function(x)
-        return np.array([x, y]).T.view(Point2D)#.round(8)
+        Subclasses can override this method to extend the ordinate model while
+        preserving the shared `evaluate_at` curve interface.
+
+        Math:
+            y(x) = C(x) * S(x)
+
+        Args:
+            x (np.ndarray | float): Chordwise location(s) in [0, 1].
+
+        Returns:
+            np.ndarray: Ordinate values with shape [N].
+        """
+        x_vec = self._prepare_input(x)
+        return self.class_function(x_vec) * self.shape_function(x_vec)
 
     def __call__(self, x: float | np.ndarray) -> float | np.ndarray:
-        """
-        An alternative evaluation of the CST curve at x in [0, 1].
+        """Evaluate CST ordinate y(x) with scalar/array semantic preservation.
 
-        :math:`y(x) = M(x) * a`
+        This method is kept as a convenience alias for compatibility. The
+        canonical geometry API entry point remains `evaluate_at`.
+
+        Math:
+            y = C(x) * S(x)
+
+        Args:
+            x (float | np.ndarray): Chordwise location(s).
+
+        Returns:
+            float | np.ndarray: Scalar for scalar input, else vector [N].
         """
-        if np.any(x < 0) or np.any(x > 1):
-            raise ValueError("x must be in the range [0, 1]")
-        return self.M(x) @ self.coefficients
+        scalar_input = np.asarray(x).ndim == 0
+        y = self.ordinate_at(x)
+        return float(y[0]) if scalar_input else y
+
+    def evaluate_at(self, x: np.ndarray | float) -> Point2D:
+        """Evaluate and return geometric points [x, y(x)].
+
+        This convenience method is used by curve and airfoil utilities that
+        operate on explicit coordinate arrays.
+
+        Math:
+            p_i = [x_i, y(x_i)]
+
+        Args:
+            x (np.ndarray | float): Chordwise location(s).
+
+        Returns:
+            Point2D: Point array with shape [N, 2].
+        """
+        x_vec = self._prepare_input(x)
+        y_vec = self.ordinate_at(x_vec)
+        return np.column_stack([x_vec, y_vec]).view(Point2D)
 
     @classmethod
     def fit(
@@ -1705,255 +1890,917 @@ class CSTCurve(Curve):
         n1: float = 0.5,
         n2: float = 1.0,
         verbose: bool = False,
-    ):
-        """
-        Fit the CST coefficients to the provided 2D data points using direct
-        least-squares when n1 and n2 are fixed.
+        rcond: float | None = None,
+    ) -> "CSTCurve":
+        """Fit CST coefficients to point data via linear least squares.
+
+        With fixed exponents n1 and n2, the CST model is linear in the
+        coefficient vector, so a direct least-squares solve is sufficient.
+
+        Math:
+            y \approx M a
+            a* = argmin_a ||M a - y||_2
 
         Args:
-            data (np.ndarray): 2D data points to fit curve to.
-            num_coefficients (int): Number of Bernstein coefficients.
-                Default is 6.
-            n1 (float): Exponent for C(x) term.
-                Default is 0.5.
-            n2 (float): Exponent for C(x) term.
-                Default is 1.0.
-            verbose (bool): Print fitting diagnostics.
-                Default is False.
+            data (np.ndarray): Fitting coordinates with shape [N, 2].
+            num_coefficients (int): Number of coefficients K.
+            n1 (float): Leading-edge class exponent.
+            n2 (float): Trailing-edge class exponent.
+            verbose (bool): If True, prints solve diagnostics.
+            rcond (float | None): Least-squares cutoff passed to lstsq.
 
         Returns:
-            CSTCurve: A fitted CSTCurve instance.
+            CSTCurve: Fitted curve instance.
         """
-        if not isinstance(data, Geom2D):
-            data = data.view(Point2D)
+        pts = np.asarray(data, dtype=float)
+        if pts.ndim != 2 or pts.shape[1] != 2:
+            raise ValueError("data must have shape [N, 2]")
+        if pts.shape[0] < num_coefficients:
+            raise ValueError(
+                f"Need at least {num_coefficients} points to fit {num_coefficients} coefficients"
+            )
 
-        x, y = data.x[:, None], data.y
+        x = pts[:, 0]
+        y = pts[:, 1]
+        if np.any(x < 0.0) or np.any(x > 1.0):
+            raise ValueError("x coordinates must be in [0, 1]")
 
-        n = num_coefficients - 1        # Polynomial degree (number of Bernstein terms)
-        k_vec = np.arange(n + 1)        # index vector for Bernstein polynomials
-        binom_coeffs = comb(n, k_vec)   # binomial coefficients
+        x_safe = np.clip(x, np.finfo(float).eps, 1.0 - np.finfo(float).eps)
+        n = int(num_coefficients - 1)
+        k = np.arange(num_coefficients, dtype=float)
+        binom = comb(n, k)
 
-        Cx = np.power(x, n1) * np.power(1.0 - x, n2)            # Class function
-        Bx = np.power(x, k_vec) * np.power(1.0 - x, n - k_vec)  # Bernstein polynomial matrix
+        Cx = np.power(x_safe, n1) * np.power(1.0 - x_safe, n2)
+        Bx = np.power(x_safe[:, None], k) * np.power(1.0 - x_safe[:, None], n - k)
+        Mx = Cx[:, None] * Bx * binom
 
-        Mx = Cx * Bx * binom_coeffs     # Weighted Bernstein basis matrix
-
-        # Solve for the coefficients using least squares
-        cst, residuals, rank, svals = np.linalg.lstsq(Mx, y, rcond=None)
-
+        coeffs, residuals, rank, svals = np.linalg.lstsq(Mx, y, rcond=rcond)
         if verbose:
             print(f"Residuals: {residuals}")
             print(f"Rank of M: {rank}")
             print(f"Singular values: {svals}")
 
-        return cls(cst, n1=n1, n2=n2)
+        curve = cls(coeffs, n1=n1, n2=n2)
+        curve._fitted_points = pts.copy()
+        return curve
 
-    # Ugly stuff
-    def class_first_deriv(self, x: Union[float, np.ndarray]) -> np.ndarray:
-        """ First derivative of the class function
+    def class_first_derivative(self, x: float | np.ndarray) -> np.ndarray:
+        """Evaluate the first derivative of the class function.
 
-        :math:`\frac{dC(x)}{dx} = n1 x^{n1 - 1} (1 - x)^n2 - n2 x^n1 (1 - x)^{n2 - 1}`
-
-        Args:
-            x (np.ndarray): Input array chordwise location.
-
-        Returns:
-            np.ndarray: First derivative of the class function
-        """
-        return(
-        self.n1 * x**(self.n1 - 1) * (1 - x)**self.n2
-        - self.n2 * x**self.n1 * (1 - x)**(self.n2 - 1)
-    )
-
-    def class_second_deriv(self, x: Union[float, np.ndarray]) -> np.ndarray:
-        """ Second derivative of the class function
-
-        :math:`\frac{d^2C(x)}{dx^2} = n1 (n1 - 1) x^{n1 - 2} (1 - x)^n2 - 2 n1
-        n2 x^{n1 - 1} (1 - x)^{n2 - 1} + n2 (n2 - 1) x^n1 (1 - x)^{n2 - 2}`
+        Math:
+            C'(x) = n1 x^{n1-1}(1-x)^{n2} - n2 x^{n1}(1-x)^{n2-1}
 
         Args:
-            x (np.ndarray): Input array chordwise location.
+            x (float | np.ndarray): Chordwise location(s).
 
         Returns:
-            np.ndarray: Second derivative of the class function
+            np.ndarray: First derivative values with shape [N].
         """
-        return(
-            self.n1 * (self.n1 - 1) * x**(self.n1 - 2) * (1 - x)**self.n2
-            - 2 * self.n1 * self.n2 * x**(self.n1 - 1) * (1 - x)**(self.n2 - 1)
-            + self.n2 * (self.n2 - 1) * x**self.n1 * (1 - x)**(self.n2 - 2)
-        )
-
-    def shape_first_deriv(self, x: Union[float, np.ndarray]) -> np.ndarray:
-        """ First derivative of the shape function
-
-        :math:`\frac{dS(x)}{dx} = \sum_{k=0}^n a_k \binom{n}{k} (k x^{k - 1} (1
-        - x)^{n - k} - (n - k) x^k (1 - x)^{n - k - 1})`
-
-        Args:
-            x (np.ndarray): Input array chordwise location.
-
-        Returns:
-            np.ndarray: First derivative of the shape function
-        """
-        return np.sum(
-            self.coefficients
-            * self.binomial_weights
-            * (
-                self.k_vec
-                * np.power(x, self.k_vec - 1)
-                * np.power(1 - x, self.degree - self.k_vec)
-            ),
-            axis=-1,
-        )
-
-    def shape_second_deriv(self, x: Union[float, np.ndarray]) -> np.ndarray:
-        """ Second derivative of the shape function
-
-        :math:`\frac{d^2S(x)}{dx^2} = \sum_{k=0}^n a_k \binom{n}{k} ((k - 1) k
-        x^{k - 2} (1 - x)^{n - k} - 2 (n - k) k x^{k - 1} (1 - x)^{n - k - 1} +
-        (n - k - 1) (n - k) x^k (1 - x)^{n - k - 2})`
-
-        Args:
-            x (np.ndarray): Input array chordwise location.
-
-        Returns:
-            np.ndarray: Second derivative of the shape function.
-        """
-        return np.sum(
-            self.coefficients
-            * self.binomial_weights
-            * self.k_vec * (self.k_vec - 1)
-            * np.power(x, self.k_vec - 2)
-            * np.power(1 - x, self.degree - self.k_vec),
-            axis=-1,
-        )
-
-    def first_deriv_at(self, x: Union[float, np.ndarray]) -> np.ndarray:
-        """ First derivative of the CST curve at x.
-        :math:`\frac{dy}{dx} = \frac{dC(x)}{dx} S(x) + C(x) \frac{dS(x)}{dx}`
-
-        Args:
-            x (Union[float, np.ndarray]): chordwise location
-
-        Returns:
-            np.ndarray: First derivative of the CST curve at x.
-        """
+        x = self._prepare_input(x)
+        x_safe = np.clip(x, self.eps, 1.0 - self.eps)
+        one_minus_x = np.clip(1.0 - x_safe, self.eps, None)
         return (
-            self.class_first_deriv(x) * self.shape_function(x)
-            + self.class_function(x) * self.shape_first_deriv(x)
+            self.n1 * np.power(x_safe, self.n1 - 1.0) * np.power(one_minus_x, self.n2)
+            - self.n2 * np.power(x_safe, self.n1) * np.power(one_minus_x, self.n2 - 1.0)
         )
 
-    def second_deriv_at(self, x: Union[float, np.ndarray]) -> np.ndarray:
-        """ Second derivative of the CST curve at x.
+    def class_second_derivative(self, x: float | np.ndarray) -> np.ndarray:
+        """Evaluate the second derivative of the class function.
 
-        :math:`\frac{d^2y}{dx^2} = \frac{d^2C(x)}{dx^2} S(x) + 2 \frac{dC(x)}{dx} \frac{dS(x)}{dx} + C(x) \frac{d^2S(x)}{dx^2}`
+        Math:
+            C''(x) = n1(n1-1)x^{n1-2}(1-x)^{n2}
+                    -2n1n2 x^{n1-1}(1-x)^{n2-1}
+                    +n2(n2-1)x^{n1}(1-x)^{n2-2}
 
         Args:
-            x (Union[float, np.ndarray]): Input array chordwise location.
+            x (float | np.ndarray): Chordwise location(s).
 
         Returns:
-            np.ndarray: Second derivative of the CST curve at x.
+            np.ndarray: Second derivative values with shape [N].
         """
+        x = self._prepare_input(x)
+        x_safe = np.clip(x, self.eps, 1.0 - self.eps)
+        one_minus_x = np.clip(1.0 - x_safe, self.eps, None)
         return (
-            self.class_second_deriv(x) * self.shape_function(x)
-            + 2 * self.class_first_deriv(x) * self.shape_first_deriv(x)
-            + self.class_function(x) * self.shape_second_deriv(x)
+            self.n1
+            * (self.n1 - 1.0)
+            * np.power(x_safe, self.n1 - 2.0)
+            * np.power(one_minus_x, self.n2)
+            - 2.0
+            * self.n1
+            * self.n2
+            * np.power(x_safe, self.n1 - 1.0)
+            * np.power(one_minus_x, self.n2 - 1.0)
+            + self.n2
+            * (self.n2 - 1.0)
+            * np.power(x_safe, self.n1)
+            * np.power(one_minus_x, self.n2 - 2.0)
         )
 
-    # Aliases
-    dC = class_first_deriv
-    d2C = class_second_deriv
-    dS = shape_first_deriv
-    d2S = shape_second_deriv
+    def shape_first_derivative(self, x: float | np.ndarray) -> np.ndarray:
+        """Evaluate the first derivative of the shape function.
+
+        Math:
+            S'(x) = sum_k a_k binom(n,k)
+                    [k x^{k-1}(1-x)^{n-k} - (n-k)x^k(1-x)^{n-k-1}]
+
+        Args:
+            x (float | np.ndarray): Chordwise location(s).
+
+        Returns:
+            np.ndarray: First derivative values with shape [N].
+        """
+        x = self._prepare_input(x)
+        x_col = np.clip(x, self.eps, 1.0 - self.eps)[:, None]
+        one_minus_x = np.clip(1.0 - x_col, self.eps, None)
+
+        basis_derivative = (
+            self.k * np.power(x_col, self.k - 1.0) * np.power(one_minus_x, self.n - self.k)
+            - (self.n - self.k)
+            * np.power(x_col, self.k)
+            * np.power(one_minus_x, self.n - self.k - 1.0)
+        )
+        return basis_derivative @ (self.coefficients * self.binomial_weights)
+
+    def shape_second_derivative(self, x: float | np.ndarray) -> np.ndarray:
+        """Evaluate the second derivative of the shape function.
+
+        Math:
+            S''(x) = sum_k a_k binom(n,k) [
+                     k(k-1)x^{k-2}(1-x)^{n-k}
+                     -2k(n-k)x^{k-1}(1-x)^{n-k-1}
+                     +(n-k)(n-k-1)x^k(1-x)^{n-k-2} ]
+
+        Args:
+            x (float | np.ndarray): Chordwise location(s).
+
+        Returns:
+            np.ndarray: Second derivative values with shape [N].
+        """
+        x = self._prepare_input(x)
+        x_col = np.clip(x, self.eps, 1.0 - self.eps)[:, None]
+        one_minus_x = np.clip(1.0 - x_col, self.eps, None)
+
+        basis_second_derivative = (
+            self.k
+            * (self.k - 1.0)
+            * np.power(x_col, self.k - 2.0)
+            * np.power(one_minus_x, self.n - self.k)
+            - 2.0
+            * self.k
+            * (self.n - self.k)
+            * np.power(x_col, self.k - 1.0)
+            * np.power(one_minus_x, self.n - self.k - 1.0)
+            + (self.n - self.k)
+            * (self.n - self.k - 1.0)
+            * np.power(x_col, self.k)
+            * np.power(one_minus_x, self.n - self.k - 2.0)
+        )
+        return basis_second_derivative @ (self.coefficients * self.binomial_weights)
+
+    def first_deriv_at(self, x: float | np.ndarray) -> np.ndarray:
+        """Evaluate dy/dx for the CST curve.
+
+        Math:
+            y'(x) = C'(x)S(x) + C(x)S'(x)
+
+        Args:
+            x (float | np.ndarray): Chordwise location(s).
+
+        Returns:
+            np.ndarray: First derivative dy/dx with shape [N].
+        """
+        x = self._prepare_input(x)
+        return (
+            self.class_first_derivative(x) * self.shape_function(x)
+            + self.class_function(x) * self.shape_first_derivative(x)
+        )
+
+    def second_deriv_at(self, x: float | np.ndarray) -> np.ndarray:
+        """Evaluate d2y/dx2 for the CST curve.
+
+        Math:
+            y''(x) = C''(x)S(x) + 2C'(x)S'(x) + C(x)S''(x)
+
+        Args:
+            x (float | np.ndarray): Chordwise location(s).
+
+        Returns:
+            np.ndarray: Second derivative d2y/dx2 with shape [N].
+        """
+        x = self._prepare_input(x)
+        return (
+            self.class_second_derivative(x) * self.shape_function(x)
+            + 2.0 * self.class_first_derivative(x) * self.shape_first_derivative(x)
+            + self.class_function(x) * self.shape_second_derivative(x)
+        )
+
+    def tangent_at(self, x: float | np.ndarray) -> np.ndarray:
+        """Compute normalized tangent vectors of the graph y(x).
+
+        The tangent for each x is formed from [1, y'(x)] and normalized.
+
+        Math:
+            t = [1, y'] / sqrt(1 + y'^2)
+
+        Args:
+            x (float | np.ndarray): Chordwise location(s).
+
+        Returns:
+            np.ndarray: Tangent vector(s), shape [2] or [N, 2].
+        """
+        scalar_input = np.asarray(x).ndim == 0
+        x_vec = self._prepare_input(x)
+        dy = self.first_deriv_at(x_vec)
+        mag = np.sqrt(1.0 + dy**2)
+        tangent = np.column_stack([np.ones_like(dy) / mag, dy / mag])
+        return tangent[0] if scalar_input else tangent
+
+    def normal_at(self, x: float | np.ndarray, direction: str = "outward") -> np.ndarray:
+        """Compute normalized normal vectors of the graph y(x).
+
+        The default outward convention applies a +90 degree rotation of the
+        tangent [1, y'].
+
+        Math:
+            n_out = [-y', 1] / sqrt(1 + y'^2)
+            n_in  = [ y',-1] / sqrt(1 + y'^2)
+
+        Args:
+            x (float | np.ndarray): Chordwise location(s).
+            direction (str): Either "outward" or "inward".
+
+        Returns:
+            np.ndarray: Normal vector(s), shape [2] or [N, 2].
+        """
+        scalar_input = np.asarray(x).ndim == 0
+        x_vec = self._prepare_input(x)
+        dy = self.first_deriv_at(x_vec)
+        mag = np.sqrt(1.0 + dy**2)
+
+        if direction == "outward":
+            normal = np.column_stack([-dy / mag, np.ones_like(dy) / mag])
+        elif direction == "inward":
+            normal = np.column_stack([dy / mag, -np.ones_like(dy) / mag])
+        else:
+            raise ValueError("direction must be 'outward' or 'inward'")
+
+        return normal[0] if scalar_input else normal
+
+    def curvature_at(self, x: float | np.ndarray) -> np.ndarray:
+        """Compute scalar curvature of y(x).
+
+        Math:
+            kappa(x) = y''(x) / (1 + y'(x)^2)^{3/2}
+
+        Args:
+            x (float | np.ndarray): Chordwise location(s).
+
+        Returns:
+            np.ndarray: Curvature values with shape [N].
+        """
+        x_vec = self._prepare_input(x)
+        dy = self.first_deriv_at(x_vec)
+        d2y = self.second_deriv_at(x_vec)
+        return d2y / np.power(1.0 + dy**2, 1.5)
+
+    def radius_at(self, x: float | np.ndarray) -> np.ndarray:
+        """Compute radius of curvature.
+
+        Math:
+            R(x) = 1 / kappa(x)
+
+        Args:
+            x (float | np.ndarray): Chordwise location(s).
+
+        Returns:
+            np.ndarray: Radius values with shape [N], using inf at zero curvature.
+        """
+        kappa = self.curvature_at(x)
+        return np.where(np.abs(kappa) > self.eps, 1.0 / kappa, np.inf)
+
+    class_first_deriv = class_first_derivative
+    class_second_deriv = class_second_derivative
+    shape_first_deriv = shape_first_derivative
+    shape_second_deriv = shape_second_derivative
+
+    dC = class_first_derivative
+    d2C = class_second_derivative
+    dS = shape_first_derivative
+    d2S = shape_second_derivative
+
+    first_derivative_at = first_deriv_at
+    second_derivative_at = second_deriv_at
+
+
+class KulfanModifiedCST(CSTCurve):
+    """Represent a single Kulfan-modified CST curve.
+
+    This class extends `CSTCurve` with the standard Kulfan leading-edge and
+    trailing-edge modifiers used for practical airfoil parameterization.
+
+    Math:
+        y_mod(x) = y_base(x)
+                   + w_le * x * (1 - x)^{n + 0.5}
+                   + s_te * t_te * x / 2
+
+    Args:
+        coefficients (np.ndarray): Base CST coefficients with shape [K].
+        leading_edge_weight (float): Kulfan leading-edge weight w_le.
+        trailing_edge_thickness (float): Trailing-edge thickness t_te (>= 0).
+        surface_type (str | None): "upper" or "lower". If None, inferred.
+        n1 (float): Leading-edge class exponent.
+        n2 (float): Trailing-edge class exponent.
+
+    Returns:
+        None: Class is initialized in place.
+    """
+
+    def __init__(
+        self,
+        coefficients: np.ndarray,
+        leading_edge_weight: float = 0.0,
+        trailing_edge_thickness: float = 0.0,
+        surface_type: str | None = None,
+        n1: float = 0.5,
+        n2: float = 1.0,
+    ):
+        """Initialize a Kulfan-modified single-surface CST curve.
+
+        The sign of the trailing-edge linear modifier is determined from
+        `surface_type`, where upper uses +1 and lower uses -1.
+
+        Math:
+            delta_le(x) = w_le * x * (1 - x)^{n + 0.5}
+            delta_te(x) = s_te * t_te * x / 2
+
+        Args:
+            coefficients (np.ndarray): Base coefficients [K].
+            leading_edge_weight (float): Leading-edge modifier weight.
+            trailing_edge_thickness (float): Non-negative TE thickness.
+            surface_type (str | None): "upper" or "lower".
+            n1 (float): Leading-edge class exponent.
+            n2 (float): Trailing-edge class exponent.
+
+        Returns:
+            None: Attributes are stored on the instance.
+        """
+        super().__init__(coefficients=coefficients, n1=n1, n2=n2)
+
+        le = float(np.asarray(leading_edge_weight, dtype=float).reshape(-1)[0])
+        te = float(np.asarray(trailing_edge_thickness, dtype=float).reshape(-1)[0])
+        if te < 0.0:
+            warning(
+                "Trailing-edge thickness must be non-negative. Using absolute value."
+            )
+        self.leading_edge_weight = le
+        self.trailing_edge_thickness = abs(te)
+
+        inferred = self.infer_surface_type()
+        if surface_type is None:
+            self.surface_type = inferred
+        else:
+            st = str(surface_type).lower()
+            if st not in ("upper", "lower"):
+                raise ValueError("surface_type must be 'upper' or 'lower'")
+            if st != inferred:
+                raise ValueError(
+                    f"Provided surface_type '{st}' does not match inferred type '{inferred}'"
+                )
+            self.surface_type = st
+
+    def infer_surface_type(self) -> str:
+        """Infer surface type from the first CST coefficient sign.
+
+        Positive first coefficient corresponds to upper surfaces and negative to
+        lower surfaces in this convention.
+
+        Math:
+            sign(a_0) > 0 -> upper
+            sign(a_0) < 0 -> lower
+
+        Args:
+            None.
+
+        Returns:
+            str: Inferred surface type, either "upper" or "lower".
+        """
+        c0 = float(self.coefficients[0])
+        if c0 > 0.0:
+            return "upper"
+        if c0 < 0.0:
+            return "lower"
+        raise ValueError(
+            "Cannot infer surface_type from first coefficient when it is zero"
+        )
+
+    @property
+    def te_sign(self) -> float:
+        """Return signed TE multiplier for this surface.
+
+        Math:
+            s_te = +1 (upper), -1 (lower)
+
+        Args:
+            None.
+
+        Returns:
+            float: Signed TE multiplier.
+        """
+        return 1.0 if self.surface_type == "upper" else -1.0
+
+    @property
+    def parameters(self) -> np.ndarray:
+        """Return Kulfan parameters as one vector.
+
+        The output layout matches the single-surface convention:
+        [coefficients..., leading_edge_weight, trailing_edge_thickness].
+
+        Math:
+            p = [a_0, ..., a_n, w_le, t_te]
+
+        Args:
+            None.
+
+        Returns:
+            np.ndarray: Parameter vector of shape [K + 2].
+        """
+        return np.concatenate(
+            [
+                self.coefficients,
+                np.array([self.leading_edge_weight, self.trailing_edge_thickness]),
+            ]
+        )
+
+    params = parameters
+
+    def leading_edge_mod(self, x: np.ndarray | float) -> np.ndarray:
+        """Evaluate the Kulfan leading-edge modifier term.
+
+        Math:
+            delta_le(x) = w_le * x * (1 - x)^{n + 0.5}
+
+        Args:
+            x (np.ndarray | float): Chordwise location(s) in [0, 1].
+
+        Returns:
+            np.ndarray: Leading-edge modifier values with shape [N].
+        """
+        x_vec = self._prepare_input(x)
+        one_minus_x = np.clip(1.0 - x_vec, self.eps, None)
+        return self.leading_edge_weight * x_vec * np.power(one_minus_x, self.degree + 0.5)
+
+    def trailing_edge_mod(self, x: np.ndarray | float) -> np.ndarray:
+        """Evaluate the Kulfan trailing-edge modifier term.
+
+        Math:
+            delta_te(x) = s_te * t_te * x / 2
+
+        Args:
+            x (np.ndarray | float): Chordwise location(s) in [0, 1].
+
+        Returns:
+            np.ndarray: Trailing-edge modifier values with shape [N].
+        """
+        x_vec = self._prepare_input(x)
+        return self.te_sign * self.trailing_edge_thickness * x_vec / 2.0
+
+    def ordinate_at(self, x: np.ndarray | float) -> np.ndarray:
+        """Evaluate modified Kulfan-CST ordinate values y_mod(x).
+
+        Math:
+            y_mod = y_base + delta_le + delta_te
+
+        Args:
+            x (np.ndarray | float): Chordwise location(s) in [0, 1].
+
+        Returns:
+            np.ndarray: Modified ordinate values with shape [N].
+        """
+        x_vec = self._prepare_input(x)
+        return (
+            self.class_function(x_vec) * self.shape_function(x_vec)
+            + self.leading_edge_mod(x_vec)
+            + self.trailing_edge_mod(x_vec)
+        )
+
+    def leading_edge_mod_first_derivative(self, x: np.ndarray | float) -> np.ndarray:
+        """Evaluate d(delta_le)/dx.
+
+        Math:
+            d/dx delta_le = w_le * [
+                (1 - x)^{n+0.5} - (n+0.5)x(1-x)^{n-0.5}
+            ]
+
+        Args:
+            x (np.ndarray | float): Chordwise location(s).
+
+        Returns:
+            np.ndarray: First derivative of LE modifier with shape [N].
+        """
+        x_vec = self._prepare_input(x)
+        one_minus_x = np.clip(1.0 - x_vec, self.eps, None)
+        exponent = self.degree + 0.5
+        return self.leading_edge_weight * (
+            np.power(one_minus_x, exponent)
+            - exponent * x_vec * np.power(one_minus_x, exponent - 1.0)
+        )
+
+    def leading_edge_mod_second_derivative(self, x: np.ndarray | float) -> np.ndarray:
+        """Evaluate d2(delta_le)/dx2.
+
+        Math:
+            d2/dx2 delta_le = w_le * [
+                -2p(1-x)^{p-1} + p(p-1)x(1-x)^{p-2}
+            ], p = n + 0.5
+
+        Args:
+            x (np.ndarray | float): Chordwise location(s).
+
+        Returns:
+            np.ndarray: Second derivative of LE modifier with shape [N].
+        """
+        x_vec = self._prepare_input(x)
+        one_minus_x = np.clip(1.0 - x_vec, self.eps, None)
+        exponent = self.degree + 0.5
+        return self.leading_edge_weight * (
+            -2.0 * exponent * np.power(one_minus_x, exponent - 1.0)
+            + exponent
+            * (exponent - 1.0)
+            * x_vec
+            * np.power(one_minus_x, exponent - 2.0)
+        )
+
+    def trailing_edge_mod_first_derivative(self, x: np.ndarray | float) -> np.ndarray:
+        """Evaluate d(delta_te)/dx.
+
+        Math:
+            d/dx delta_te = s_te * t_te / 2
+
+        Args:
+            x (np.ndarray | float): Chordwise location(s).
+
+        Returns:
+            np.ndarray: Constant first derivative values with shape [N].
+        """
+        x_vec = self._prepare_input(x)
+        return np.ones_like(x_vec) * self.te_sign * self.trailing_edge_thickness / 2.0
+
+    def trailing_edge_mod_second_derivative(self, x: np.ndarray | float) -> np.ndarray:
+        """Evaluate d2(delta_te)/dx2.
+
+        The trailing-edge modifier is linear in x, so its second derivative is
+        identically zero.
+
+        Math:
+            d2/dx2 delta_te = 0
+
+        Args:
+            x (np.ndarray | float): Chordwise location(s).
+
+        Returns:
+            np.ndarray: Zero array with shape [N].
+        """
+        x_vec = self._prepare_input(x)
+        return np.zeros_like(x_vec)
+
+    dLE_mod = leading_edge_mod_first_derivative
+    d2LE_mod = leading_edge_mod_second_derivative
+    dTE_mod = trailing_edge_mod_first_derivative
+    d2TE_mod = trailing_edge_mod_second_derivative
+
+    def first_deriv_at(self, x: np.ndarray | float) -> np.ndarray:
+        """Evaluate first derivative of the modified curve.
+
+        Math:
+            y'_mod = y'_base + delta'_le + delta'_te
+
+        Args:
+            x (np.ndarray | float): Chordwise location(s).
+
+        Returns:
+            np.ndarray: First derivative values with shape [N].
+        """
+        x_vec = self._prepare_input(x)
+        return (
+            super().first_deriv_at(x_vec)
+            + self.leading_edge_mod_first_derivative(x_vec)
+            + self.trailing_edge_mod_first_derivative(x_vec)
+        )
+
+    def second_deriv_at(self, x: np.ndarray | float) -> np.ndarray:
+        """Evaluate second derivative of the modified curve.
+
+        Math:
+            y''_mod = y''_base + delta''_le + delta''_te
+            delta''_te = 0
+
+        Args:
+            x (np.ndarray | float): Chordwise location(s).
+
+        Returns:
+            np.ndarray: Second derivative values with shape [N].
+        """
+        x_vec = self._prepare_input(x)
+        return (
+            super().second_deriv_at(x_vec)
+            + self.leading_edge_mod_second_derivative(x_vec)
+        )
+
+    first_derivative_at = first_deriv_at
+    second_derivative_at = second_deriv_at
+
+    def consistent_surface_type(self) -> bool:
+        """Check consistency between coefficient sign and surface label.
+
+        Math:
+            sign(a_0) > 0 iff surface_type == upper
+            sign(a_0) < 0 iff surface_type == lower
+
+        Args:
+            None.
+
+        Returns:
+            bool: True when sign convention matches the stored surface type.
+        """
+        sign = np.sign(self.coefficients[0])
+        return (sign > 0 and self.surface_type == "upper") or (
+            sign < 0 and self.surface_type == "lower"
+        )
+
+    @classmethod
+    def fit(
+        cls,
+        points: np.ndarray,
+        n_coefficients: int = 8,
+        trailing_edge_solution: str = "fit",
+        surface_type: str | None = None,
+        n1: float = 0.5,
+        n2: float = 1.0,
+        rcond: float | None = None,
+    ) -> "KulfanModifiedCST":
+        """Fit a single Kulfan-modified CST curve to point data.
+
+        This solves a linear least-squares system for coefficients and Kulfan
+        modifiers. Two trailing-edge strategies are supported:
+        - "fit": solve signed TE term in the linear system.
+        - "data": infer signed TE from the endpoint and solve remaining terms.
+
+        Math:
+            y \approx M(theta) where
+            theta = [a_0..a_n, w_le, t_te] (fit)
+            theta = [a_0..a_n, w_le] with known t_te (data)
+
+        Args:
+            points (np.ndarray): Coordinates with shape [N, 2].
+            n_coefficients (int): Number of CST coefficients K.
+            trailing_edge_solution (str): "fit" or "data".
+            surface_type (str | None): Optional forced surface label.
+            n1 (float): Leading-edge class exponent.
+            n2 (float): Trailing-edge class exponent.
+            rcond (float | None): Least-squares cutoff.
+
+        Returns:
+            KulfanModifiedCST: Fitted modified CST curve instance.
+        """
+        pts = np.asarray(points, dtype=float)
+        if pts.ndim != 2 or pts.shape[1] != 2:
+            raise ValueError("points must have shape [N, 2]")
+        if trailing_edge_solution not in ("fit", "data"):
+            raise ValueError("trailing_edge_solution must be 'fit' or 'data'")
+
+        n_unknowns = n_coefficients + (2 if trailing_edge_solution == "fit" else 1)
+        if pts.shape[0] < n_unknowns:
+            raise ValueError(
+                f"Need at least {n_unknowns} points to fit this model, got {pts.shape[0]}"
+            )
+
+        x_vals = pts[:, 0]
+        y_vals = pts[:, 1]
+        if np.any(x_vals < 0.0) or np.any(x_vals > 1.0):
+            raise ValueError("x coordinates must lie within [0, 1]")
+
+        eps = np.finfo(float).eps
+        x = np.clip(x_vals, eps, 1.0 - eps)
+        n = int(n_coefficients - 1)
+        k = np.arange(n_coefficients, dtype=float)
+        binom = comb(n, k)
+
+        Cx = np.power(x, n1) * np.power(1.0 - x, n2)
+        Bx = np.power(x[:, None], k) * np.power(1.0 - x[:, None], n - k)
+        Mx = Cx[:, None] * Bx * binom
+        le_mod = x * np.power(1.0 - x, n + 0.5)
+
+        if trailing_edge_solution == "fit":
+            te_mod = x / 2.0
+            M = np.column_stack([Mx, le_mod, te_mod])
+            solution, *_ = np.linalg.lstsq(M, y_vals, rcond=rcond)
+            coeffs = solution[:n_coefficients]
+            le_weight = float(solution[-2])
+            te_signed = float(solution[-1])
+        else:
+            te_signed = float(2.0 * y_vals[-1])
+            y_target = y_vals - (x / 2.0) * te_signed
+            M = np.column_stack([Mx, le_mod])
+            solution, *_ = np.linalg.lstsq(M, y_target, rcond=rcond)
+            coeffs = solution[:n_coefficients]
+            le_weight = float(solution[-1])
+
+        te_thickness = abs(te_signed)
+
+        if abs(te_signed) > eps:
+            inferred_surface = "upper" if te_signed > 0 else "lower"
+        elif coeffs[0] > 0:
+            inferred_surface = "upper"
+        elif coeffs[0] < 0:
+            inferred_surface = "lower"
+        elif surface_type is not None:
+            inferred_surface = str(surface_type).lower()
+        else:
+            raise ValueError(
+                "Cannot infer surface_type from points. Pass surface_type explicitly."
+            )
+
+        if surface_type is not None and str(surface_type).lower() != inferred_surface:
+            raise ValueError(
+                "Provided surface_type conflicts with inferred surface orientation"
+            )
+
+        curve = cls(
+            coefficients=coeffs,
+            leading_edge_weight=le_weight,
+            trailing_edge_thickness=te_thickness,
+            surface_type=inferred_surface,
+            n1=n1,
+            n2=n2,
+        )
+        curve._fitted_points = pts.copy()
+        return curve
 
 
 class CSTAirfoilSurface:
-    """
-    A parametric CST-based airfoil curve, x(u), y(u), covering upper and lower surfaces.
+    """Wrap upper and lower CST curves as one perimeter-parameterized surface.
 
-    Here, we define a parameter u in [0,1] that 'walks' around the airfoil from the trailing edge,
-    around the leading edge, and back to the trailing edge.
-    For simplicity, we assume:
-      - 0 <= u <= 0.5 describes the upper surface,
-      - 0.5 <= u <= 1.0 describes the lower surface.
+    This adapter keeps compatibility with older APIs that expect a single
+    parametric airfoil curve while the underlying representation uses two
+    single-valued functions y_u(x) and y_l(x).
+
+    Math:
+        x(u) = |1 - 2u|, u in [0, 1]
+        y(u) = y_u(x(u)) for u <= 0.5, else y_l(x(u))
 
     Args:
-        upper_surface (CSTCurve or np.ndarray): CST curve or coefficients for the upper surface.
-        lower_surface (CSTCurve or np.ndarray): CST curve or coefficients for the lower surface.
+        upper_surface (CSTCurve | np.ndarray): Upper curve or its coefficients.
+        lower_surface (CSTCurve | np.ndarray): Lower curve or its coefficients.
+
+    Returns:
+        None: Class is initialized in place.
     """
+
     def __init__(
         self,
         upper_surface: CSTCurve | np.ndarray,
         lower_surface: CSTCurve | np.ndarray,
     ):
-        self.upper_part = upper_surface if isinstance(upper_surface, CSTCurve) else CSTCurve(upper_surface)
-        self.lower_part = lower_surface if isinstance(lower_surface, CSTCurve) else CSTCurve(lower_surface)
+        """Initialize a perimeter wrapper around upper/lower CST curves.
+
+        If coefficient arrays are provided, they are converted to `CSTCurve`
+        instances with default class exponents.
+
+        Math:
+            upper_part = CSTCurve(upper_surface) if needed
+            lower_part = CSTCurve(lower_surface) if needed
+
+        Args:
+            upper_surface (CSTCurve | np.ndarray): Upper curve or coefficients.
+            lower_surface (CSTCurve | np.ndarray): Lower curve or coefficients.
+
+        Returns:
+            None: Attributes are stored on the instance.
+        """
+        self.upper_part = (
+            upper_surface
+            if isinstance(upper_surface, CSTCurve)
+            else CSTCurve(upper_surface)
+        )
+        self.lower_part = (
+            lower_surface
+            if isinstance(lower_surface, CSTCurve)
+            else CSTCurve(lower_surface)
+        )
 
     @classmethod
     def fit(cls, data: np.ndarray, num_coefficients: int = 6, n1: float = 0.5, n2: float = 1.0):
-        """
-        Fit the CST coefficients to the provided 2D data points using direct
-        least-squares when n1 and n2 are fixed.
+        """Fit upper and lower CST curves from full Selig-style coordinates.
+
+        The method finds the leading-edge split index from the minimum x value,
+        then fits each branch independently with shared class exponents.
+
+        Math:
+            upper = fit(data[:le+1][::-1])
+            lower = fit(data[le:])
 
         Args:
-            data (np.ndarray): 2D data points to fit curve to.
-            num_coefficients (int): Number of Bernstein coefficients.
-                Default is 6.
+            data (np.ndarray): Airfoil coordinates with shape [N, 2].
+            num_coefficients (int): Number of coefficients per side.
+            n1 (float): Leading-edge class exponent.
+            n2 (float): Trailing-edge class exponent.
 
         Returns:
-            AirfoilCST: A fitted AirfoilCST instance.
+            CSTAirfoilSurface: Wrapper containing fitted upper/lower curves.
         """
-        if not isinstance(data, Geom2D):
-            data = data.view(Point2D)
+        pts = np.asarray(data, dtype=float)
+        if pts.ndim != 2 or pts.shape[1] != 2:
+            raise ValueError("data must have shape [N, 2]")
 
-        # upper = CSTCurve.fit(data[:len(data)//2][::-1], num_coefficients, n1, n2)
-        # lower = CSTCurve.fit(data[len(data)//2:], num_coefficients, n1, n2)
+        switch_idx = int(np.argmin(pts[:, 0]))
+        if switch_idx <= 0 or switch_idx >= len(pts) - 1:
+            raise ValueError("Could not locate a valid leading-edge split index")
 
-        switch_idx = np.where(np.diff(np.sign(np.diff(data[:, 0]))))[0][0] + 1
-
-        upper = CSTCurve.fit(data[:switch_idx][::-1], num_coefficients, n1, n2)
-        lower = CSTCurve.fit(data[switch_idx:], num_coefficients, n1, n2)
+        upper = CSTCurve.fit(pts[: switch_idx + 1][::-1], num_coefficients, n1, n2)
+        lower = CSTCurve.fit(pts[switch_idx:], num_coefficients, n1, n2)
 
         return cls(upper, lower)
 
     @cached_property
     def coefficients(self) -> np.ndarray:
-        """Return the coefficients for the upper and lower surfaces."""
+        """Return concatenated upper and lower coefficient vectors.
+
+        Math:
+            c = [c_upper, c_lower]
+
+        Args:
+            None.
+
+        Returns:
+            np.ndarray: Concatenated coefficients with shape [K_u + K_l].
+        """
         return np.concatenate([
             self.upper_part.coefficients, self.lower_part.coefficients
         ])
 
 
     def x(self, u):
-        """
-        Example parameter-to-x mapping for airfoil.
-        By default, we can just let x decrease from 1 at the trailing edge (u=0)
-        to 0 at the leading edge (u=0.5), and then increase back to 1 at the trailing edge (u=1).
-        One simple linear mapping is:
-            x = 1.0 - 2*abs(u - 0.5)
-        for u in [0, 1].
+        """Map perimeter parameter u to chord coordinate x.
+
+        This symmetric mapping moves from trailing edge to leading edge and back
+        to trailing edge.
+
+        Math:
+            x(u) = |1 - 2u|
+
+        Args:
+            u (float | np.ndarray): Perimeter parameter(s) in [0, 1].
+
+        Returns:
+            float | np.ndarray: Mapped chord coordinate(s) in [0, 1].
         """
         return np.abs(1 - 2 * u)
 
     def evaluate_at(self, u):
-        """
-        Evaluate x(u), y(u) at a parametric point u in [0,1].
+        """Evaluate perimeter parameter u into explicit [x, y] coordinates.
+
+        The branch selection is piecewise: upper branch for u <= 0.5 and lower
+        branch for u >= 0.5.
+
+        Math:
+            p(u) = [x(u), y_u(x(u))] if u <= 0.5
+                 = [x(u), y_l(x(u))] if u >= 0.5
+
+        Args:
+            u (float | np.ndarray): Perimeter parameter(s) in [0, 1].
 
         Returns:
-            np.ndarray: [x_val, y_val]
+            Point2D: Evaluated points with shape [N, 2] or [1, 2].
         """
         if np.any(u < 0.0) or np.any(u > 1.0):
             raise ValueError("Parameter u must be in [0,1].")
 
         x = self.x(u)
         if np.array(x).ndim == 0:
-            y = self.upper_part(x) if u <= 0.5 else self.lower_part(x)
+            if u <= 0.5:
+                y = self.upper_part.evaluate_at(x)[0, 1]
+            else:
+                y = self.lower_part.evaluate_at(x)[0, 1]
         else:
             y = np.zeros_like(x)
-            y[u <= 0.5] = self.upper_part(x[u <= 0.5])
-            y[u >= 0.5] = self.lower_part(x[u >= 0.5])
-        return np.array([x, y]).T.view(Point2D)#.round(8)
+            if np.any(u <= 0.5):
+                y[u <= 0.5] = self.upper_part.evaluate_at(x[u <= 0.5])[:, 1]
+            if np.any(u >= 0.5):
+                y[u >= 0.5] = self.lower_part.evaluate_at(x[u >= 0.5])[:, 1]
+        return np.array([x, y]).T.view(Point2D)
 
     def __call__(self, u):
+        """Alias to evaluate points at perimeter parameter u.
+
+        Math:
+            __call__(u) == evaluate_at(u)
+
+        Args:
+            u (float | np.ndarray): Perimeter parameter(s).
+
+        Returns:
+            Point2D: Evaluated coordinates.
+        """
         return self.evaluate_at(u)
 

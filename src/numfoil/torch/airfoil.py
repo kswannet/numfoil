@@ -97,6 +97,7 @@ class TorchKulfanAirfoil(nn.Module):
     def from_tensor(
         cls,
         parameters: torch.Tensor | np.ndarray,
+        name: Optional[str | list[str]] = None,
         n1: float = 0.5,
         n2: float = 1.0,
         device: Optional[torch.device | str] = None,
@@ -117,6 +118,7 @@ class TorchKulfanAirfoil(nn.Module):
             parameters (torch.Tensor | np.ndarray, shape [batch, 2*n_coeffs + 2]):
                 tensor of upper and lower CST coefficients concatenated
                 with leading edge weight and trailing edge thickness.
+            name (Optional[str | list[str]]): Airfoil name(s) or generic label.
             n1 (float): CST exponent n1, default 0.5
             n2 (float): CST exponent n2, default 1.0
             device (Optional[torch.device | str]): Torch device
@@ -1381,7 +1383,7 @@ class TorchPARSECAirfoil(nn.Module):
 
         # Normalize + build a robust spline representation using the existing geometry pipeline.
         # This enforces the chordline convention (0,0)->(1,0) used throughout this repo.
-        airfoil = BsplineAirfoil.from_coordinate_array(pts, normalize=True)
+        airfoil = BSplineAirfoil.from_coordinate_array(pts, normalize=True)
 
         # --- LE radius (shared) ---
         # u_le = float(getattr(airfoil.surface, "u_leading_edge", 0.5))
