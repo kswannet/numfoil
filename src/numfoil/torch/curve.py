@@ -974,6 +974,7 @@ class KulfanModifiedCST(TorchCSTCurve):
         leading_edge_weight: Union[torch.Tensor, float] = 0.0,
         trailing_edge_thickness: Union[torch.Tensor, float] = 0.0,
         surface_type: Optional[str] = None,
+        validate_surface_type: bool = True,
         n1: float = 0.5,
         n2: float = 1.0,
         device: Optional[torch.device | str] = None,
@@ -997,6 +998,12 @@ class KulfanModifiedCST(TorchCSTCurve):
             surface (str):
                 Either ``"upper"`` (positive TE thickness) or ``"lower"`` (negative).
                 Default is None, and type is inferred from leading-edge slope.
+
+            validate_surface_type (bool):
+                If True, validates that the provided/inferred ``surface_type``
+                matches the sign inferred from the first CST coefficient.
+                Set False when constructing curves from unconstrained optimizer
+                iterates where temporary sign flips can occur.
 
             n1 (float):
                 Leading-edge class exponent.
@@ -1026,12 +1033,20 @@ class KulfanModifiedCST(TorchCSTCurve):
         if self.surface_type not in ("upper", "lower"):
             raise ValueError("surface_type must be 'upper' or 'lower'.")
 
-        # I'm not sure about this way of inferring, but for now it seems to work
-        if not self.surface_type == self.infer_surface_type():
+        # In optimization loops, the first coefficient can temporarily cross zero.
+        # Allow disabling this strict consistency check so constraints can guide
+        # the iterate back to a valid region instead of raising immediately.
+        inferred_surface = self.infer_surface_type()
+        if validate_surface_type and self.surface_type != inferred_surface:
             raise ValueError(
                 "Inconsistent surface type: provided surface_type "
                 f"'{self.surface_type}' does not match inferred type (based on leading-edge slope) "
-                f"'{self.infer_surface_type()}'."
+                f"'{inferred_surface}'."
+            )
+        if (not validate_surface_type) and self.surface_type != inferred_surface:
+            warnings.warn(
+                "Surface type and first-coefficient sign are temporarily inconsistent. "
+                f"Proceeding with provided surface_type='{self.surface_type}' and inferred='{inferred_surface}'."
             )
 
         if not torch.all(trailing_edge_thickness >= 0):
@@ -1075,10 +1090,14 @@ class KulfanModifiedCST(TorchCSTCurve):
         elif torch.all(torch.sign(self.coefficients[..., 0]) < 0):
             return "lower"
         else:
-            raise ValueError(
-                "Inconsistent signs of leading-edge slope and first coefficient. "
-                "Potentially mixed upper/lower surfaces in batch."
+            # breakpoint()
+            # raise ValueError(
+            warnings.warn(
+                "Inconsistent signs of first coefficient. Both signs occur in batch. "
+                "Potentially mixed upper/lower surfaces in batch. "
+                f"Continuing with defined surface type: '{self.surface_type}'."
             )
+            return self.surface_type
 
     def _prepare_modifier_parameter(
         self,
@@ -1133,6 +1152,25 @@ class KulfanModifiedCST(TorchCSTCurve):
         )  # [B>1, n_coefficients + 2]
 
     params = parameters
+
+    @property
+    def wiggliness(self) -> torch.Tensor:
+        """Compute a simple wiggliness metric based the parameters.
+        Used by
+
+        Returns:
+            torch.Tensor: Shape [B] with mean absolute curvature as a wiggliness metric.
+        """
+        return torch.sum(
+            torch.diff(
+                torch.diff(
+                    self.parameters,
+                    dim=-1
+                ),
+                dim=-1
+            ).pow(2),
+            dim=-1
+        )  # [B]
 
     @property
     def te_sign(self) -> float:
