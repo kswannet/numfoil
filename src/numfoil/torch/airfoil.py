@@ -101,7 +101,6 @@ class TorchKulfanAirfoil(nn.Module):
         n1: float = 0.5,
         n2: float = 1.0,
         device: Optional[torch.device | str] = None,
-        name: Optional[str | list[str]] = None,
     ) -> "TorchKulfanAirfoil":
         """Create airfoil from Kulfan parameter tensor.
         This measns a tensor of shape [batch, 2*n_coeffs + 2], where the batch
