@@ -1,5 +1,4 @@
 import numpy as np
-from functools import cached_property
 
 from warnings import warn as warning
 
@@ -775,6 +774,80 @@ class PolarData:
         return pd.concat(
             frames, ignore_index=True
         )
+
+    def to_tensor(self, Re=None, columns=None):
+        """Export polar data as a dense ``[R, A, C]`` tensor.
+
+        This is a fast-path export for vectorized workflows where the
+        full Reynolds-by-alpha grid is needed as one array.
+
+        Args:
+            Re (float, list, or None): Optional Reynolds filter.
+            columns (str, list[str], or None): Polar columns to include.
+                ``None`` uses all columns except ``alpha``.
+
+        Returns:
+            tuple: ``(values, re_axis, alpha_axis, columns)`` where:
+                - ``values`` has shape ``[R, A, C]``
+                - ``re_axis`` has shape ``[R]``
+                - ``alpha_axis`` has shape ``[A]``
+                - ``columns`` is the resolved list of column names
+
+        Raises:
+            ValueError: If selected Reynolds blocks do not share the same
+                alpha grid, or if a selected column has an inconsistent
+                length.
+        """
+        re_list = self._select_Re(Re)
+
+        if columns is None:
+            resolved_columns = [c for c in self.columns if c != "alpha"]
+        elif isinstance(columns, str):
+            resolved_columns = [columns]
+        else:
+            resolved_columns = list(columns)
+
+        if len(resolved_columns) == 0:
+            raise ValueError("columns must contain at least one field")
+
+        if not re_list:
+            empty = np.empty((0, 0, len(resolved_columns)), dtype=float)
+            return empty, np.asarray([], dtype=float), np.asarray([], dtype=float), resolved_columns
+
+        alpha_axis = None
+        blocks = []
+        for re_value in re_list:
+            data = self._data[re_value]
+            alpha = np.asarray(data["alpha"], dtype=float).reshape(-1)
+
+            if alpha_axis is None:
+                alpha_axis = alpha
+            else:
+                same_shape = alpha.shape == alpha_axis.shape
+                same_values = np.allclose(alpha, alpha_axis, equal_nan=True)
+                if not (same_shape and same_values):
+                    raise ValueError(
+                        "Cannot build dense tensor: alpha grids differ across Reynolds values. "
+                        "Use indexed access or to_dataframe() for ragged data."
+                    )
+
+            column_arrays = []
+            for column in resolved_columns:
+                if column in data:
+                    values = np.asarray(data[column], dtype=float).reshape(-1)
+                else:
+                    values = np.full(alpha.shape, np.nan, dtype=float)
+
+                if values.shape != alpha.shape:
+                    raise ValueError(
+                        f"Column '{column}' has shape {values.shape}, expected {alpha.shape}."
+                    )
+                column_arrays.append(values)
+
+            blocks.append(np.column_stack(column_arrays))
+
+        values = np.stack(blocks, axis=0)
+        return values, np.asarray(re_list, dtype=float), alpha_axis.copy(), resolved_columns
 
 
 class CpData:
@@ -1591,7 +1664,9 @@ class AeroResults:
 
     Holds polar, Cp, and boundary-layer dump data for a
     single airfoil at a fixed Mach number, potentially across
-    multiple reynolds numbers.  Sub-data is stored in
+    multiple reynolds numbers. It can also hold a collection
+    of per-airfoil :class:`AeroResults` objects. Sub-data is
+    stored in
     :class:`PolarData`, :class:`CpData`, and
     :class:`DumpData` objects which have their own ``.plot()``
     methods.
@@ -1632,8 +1707,157 @@ class AeroResults:
         self.polar = PolarData()
         self.cp = CpData()
         self.dump = DumpData()
+        self._airfoils = {}
 
-    def __call__(self, Re=None):
+    @classmethod
+    def from_airfoils(
+        cls,
+        results,
+        label: str = "multi_airfoil",
+        Mach: float | None = None,
+        source: str | None = None,
+    ):
+        """Build a multi-airfoil container from child results.
+
+        Args:
+            results: Mapping ``{label: AeroResults}`` or iterable
+                of :class:`AeroResults` objects.
+            label: Label for the parent container.
+            Mach: Optional parent Mach override. Defaults to first
+                child Mach.
+            source: Optional parent source override. Defaults to
+                first child source.
+
+        Returns:
+            AeroResults: Multi-airfoil container.
+        """
+        if hasattr(results, "items"):
+            items = list(results.items())
+        else:
+            items = [(None, r) for r in results]
+
+        if len(items) == 0:
+            raise ValueError("results must contain at least one airfoil")
+
+        first = items[0][1]
+        if not isinstance(first, AeroResults):
+            raise TypeError("results entries must be AeroResults objects")
+
+        parent = cls(
+            label=label,
+            Mach=first.Mach if Mach is None else Mach,
+            source=first.source if source is None else source,
+        )
+        for key, child in items:
+            parent.add_airfoil(child, label=key)
+        return parent
+
+    @property
+    def is_multi_airfoil(self) -> bool:
+        """Whether this object stores multiple airfoils."""
+        return len(self._airfoils) > 0
+
+    @property
+    def airfoil_labels(self):
+        """Ordered list of airfoil labels in a multi container."""
+        return list(self._airfoils.keys())
+
+    @property
+    def airfoils(self):
+        """Shallow copy of contained airfoil results by label."""
+        return dict(self._airfoils)
+
+    def add_airfoil(
+        self,
+        result: "AeroResults",
+        label: str | None = None,
+    ) -> str:
+        """Add a single-airfoil result to this container.
+
+        Args:
+            result: Child result to store.
+            label: Optional label override.
+
+        Returns:
+            str: Final stored label (deduplicated if needed).
+        """
+        if not isinstance(result, AeroResults):
+            raise TypeError("result must be an AeroResults instance")
+        if result.is_multi_airfoil:
+            raise ValueError(
+                "result must be single-airfoil; flatten before adding"
+            )
+
+        if self.polar or self.cp or self.dump:
+            raise ValueError(
+                "cannot add airfoils to an AeroResults object that already "
+                "contains single-airfoil data"
+            )
+
+        base = str(result.label if label is None else label).strip()
+        if base == "":
+            base = "airfoil"
+
+        final = base
+        i = 2
+        while final in self._airfoils:
+            final = f"{base}_{i}"
+            i += 1
+
+        self._airfoils[final] = result
+        return final
+
+    def _resolve_airfoil_keys(self, airfoil=None):
+        """Resolve airfoil selector(s) to stored labels."""
+        if not self.is_multi_airfoil:
+            if airfoil is not None:
+                raise ValueError(
+                    "airfoil selector is only valid for multi-airfoil results"
+                )
+            return []
+
+        labels = self.airfoil_labels
+        if airfoil is None:
+            return labels
+
+        def _one(val):
+            if isinstance(val, str):
+                if val not in self._airfoils:
+                    raise KeyError(f"Unknown airfoil label: {val}")
+                return val
+            if isinstance(val, (int, np.integer)):
+                return labels[int(val)]
+            raise TypeError(
+                "airfoil selector must be label, index, or iterable of those"
+            )
+
+        if isinstance(airfoil, (str, int, np.integer)):
+            return [_one(airfoil)]
+
+        out = []
+        for item in airfoil:
+            out.append(_one(item))
+        return out
+
+    def __call__(self, Re=None, airfoil=None):
+        """Filter by reynolds and/or airfoil selector."""
+        if self.is_multi_airfoil:
+            keys = self._resolve_airfoil_keys(airfoil)
+            if len(keys) == 1 and isinstance(
+                airfoil, (str, int, np.integer)
+            ):
+                child = self._airfoils[keys[0]]
+                return child(Re=Re) if Re is not None else child
+
+            new = AeroResults(self.label, self.Mach, self.source)
+            for key in keys:
+                child = self._airfoils[key]
+                new.add_airfoil(
+                    child(Re=Re) if Re is not None else child,
+                    label=key,
+                )
+            return new
+
         new = AeroResults(self.label, self.Mach, self.source)
         new.polar = self.polar(Re=Re)
         new.cp = self.cp(Re=Re)
@@ -1641,10 +1865,30 @@ class AeroResults:
         return new
 
     def __getitem__(self, idx):
+        if self.is_multi_airfoil:
+            if isinstance(idx, str):
+                return self._airfoils[idx]
+            if isinstance(idx, (int, np.integer)):
+                key = self.airfoil_labels[int(idx)]
+                return self._airfoils[key]
+            raise TypeError(
+                "multi-airfoil indexing expects label or integer index"
+            )
         re = self.reynolds[idx]  # already sorted
         return self(Re=re)
 
     def __repr__(self):
+        if self.is_multi_airfoil:
+            labels = self.airfoil_labels
+            preview = ", ".join(labels[:3])
+            if len(labels) > 3:
+                preview += ", ..."
+            return (
+                f"AeroResults('{self.label}', "
+                f"M={self.Mach}, "
+                f"airfoils={len(labels)} [{preview}])"
+            )
+
         re = self.reynolds or []
         parts = []
         if self.polar:
@@ -1663,16 +1907,158 @@ class AeroResults:
     @property
     def reynolds(self):
         """Sorted list of reynolds numbers with data."""
+        if self.is_multi_airfoil:
+            out = set()
+            for child in self._airfoils.values():
+                out.update(child.reynolds)
+            return sorted(out)
+
+        out = set()
         if self.polar:
-            return self.polar.reynolds
+            out.update(self.polar.reynolds)
+        if self.cp:
+            out.update(self.cp.reynolds)
+        if self.dump:
+            out.update(self.dump.reynolds)
+        return sorted(out)
 
     Re = reynolds
 
-    def to_dataframe(self):
+    def __getattr__(self, name):
+        """Delegate polar metrics to single or multi containers.
+
+        For single-airfoil results this mirrors ``self.polar``.
+        For multi-airfoil results, returns ``{label: value}`` for
+        properties and ``{label: value}`` from callables.
+        """
+        if name.startswith("_") or not hasattr(self.polar, name):
+            raise AttributeError(
+                f"{self.__class__.__name__} has no attribute '{name}'"
+            )
+
+        if not self.is_multi_airfoil:
+            return getattr(self.polar, name)
+
+        sample = getattr(next(iter(self._airfoils.values())).polar, name)
+
+        if callable(sample):
+
+            def wrapped(*args, airfoil=None, **kwargs):
+                keys = self._resolve_airfoil_keys(airfoil)
+                return {
+                    key: getattr(self._airfoils[key].polar, name)(
+                        *args, **kwargs
+                    )
+                    for key in keys
+                }
+
+            return wrapped
+
+        return {
+            key: getattr(self._airfoils[key].polar, name)
+            for key in self.airfoil_labels
+        }
+
+    def metric(
+        self,
+        name: str,
+        *args,
+        airfoil=None,
+        as_dataframe: bool = False,
+        **kwargs,
+    ):
+        """Evaluate a polar metric for one or many airfoils.
+
+        Args:
+            name: PolarData property or method name (e.g. ``CL_max``
+                or ``CL``).
+            *args: Positional args for method metrics.
+            airfoil: Airfoil selector for multi-airfoil containers.
+            as_dataframe: Export as tidy table with columns
+                ``airfoil``, ``Re``, and metric value.
+            **kwargs: Keyword args for method metrics.
+
+        Returns:
+            Scalar/dict result, or a pandas DataFrame when
+            ``as_dataframe=True``.
+        """
+        if self.is_multi_airfoil:
+            keys = self._resolve_airfoil_keys(airfoil)
+            values = {}
+            single_re = {}
+            for key in keys:
+                child = self._airfoils[key]
+                attr = getattr(child.polar, name)
+                value = attr(*args, **kwargs) if callable(attr) else attr
+                values[key] = value
+
+                if not isinstance(value, dict):
+                    re_vals = child.reynolds
+                    if len(re_vals) == 1:
+                        single_re[key] = float(re_vals[0])
+
+            if as_dataframe:
+                return self._metric_dataframe(
+                    values,
+                    name,
+                    single_re=single_re,
+                )
+            return values
+
+        attr = getattr(self.polar, name)
+        value = attr(*args, **kwargs) if callable(attr) else attr
+        if as_dataframe:
+            single_re = None
+            if not isinstance(value, dict) and len(self.reynolds) == 1:
+                single_re = {self.label: float(self.reynolds[0])}
+            return self._metric_dataframe(
+                {self.label: value},
+                name,
+                single_re=single_re,
+            )
+        return value
+
+    @staticmethod
+    def _metric_dataframe(
+        values: dict,
+        metric_name: str,
+        single_re: dict | None = None,
+    ):
+        """Convert nested metric values to a tidy DataFrame."""
+        import pandas as pd
+
+        if single_re is None:
+            single_re = {}
+
+        rows = []
+        for label, value in values.items():
+            if isinstance(value, dict):
+                for re_value, item in sorted(value.items()):
+                    rows.append(
+                        {
+                            "airfoil": label,
+                            "Re": float(re_value),
+                            metric_name: item,
+                        }
+                    )
+            else:
+                rows.append(
+                    {
+                        "airfoil": label,
+                        "Re": single_re.get(label, np.nan),
+                        metric_name: value,
+                    }
+                )
+        return pd.DataFrame(rows)
+
+    def to_dataframe(self, Re=None, airfoil=None):
         """Export polar data as a pandas DataFrame.
 
         Convenience shortcut for
         ``self.polar.to_dataframe()``.
+
+        For multi-airfoil containers, returns concatenated
+        polar rows with an ``airfoil`` column.
 
         Returns:
             pandas.DataFrame: Polar data for all reynolds
@@ -1686,10 +2072,128 @@ class AeroResults:
 
             >>> df = res.to_dataframe()
         """
+        if self.is_multi_airfoil:
+            import pandas as pd
+
+            frames = []
+            for key in self._resolve_airfoil_keys(airfoil):
+                child = self._airfoils[key]
+                df = child(Re=Re).to_dataframe()
+                if df.empty:
+                    continue
+                df.insert(0, "airfoil", key)
+                frames.append(df)
+            if not frames:
+                return pd.DataFrame()
+            return pd.concat(frames, ignore_index=True)
+
         if not self.polar:
             raise RuntimeError(
                 f"No polar data for '{self.label}'. "
                 "Run get_polar() or analyze() first."
             )
-        return self.polar.to_dataframe()
+        return self.polar.to_dataframe(Re=Re)
 
+    def to_polar_tensor(
+        self,
+        Re=None,
+        airfoil=None,
+        columns=None,
+    ):
+        """Export polar data as a dense tensor for training workflows.
+
+        This method preserves the existing structured/indexed API while
+        also exposing the complete polar grid as one array.
+
+        Args:
+            Re (float, list, or None): Optional Reynolds filter.
+            airfoil: Optional airfoil selector for multi-airfoil results.
+            columns (str, list[str], or None): Polar columns to include.
+                ``None`` includes all non-alpha polar columns.
+
+        Returns:
+            dict: Tensor bundle with keys:
+                - ``values``: ``[B, R, A, C]`` array
+                - ``airfoils``: list of airfoil labels (len ``B``)
+                - ``Re``: Reynolds axis ``[R]``
+                - ``alpha``: alpha axis ``[A]``
+                - ``columns``: column names (len ``C``)
+
+        Raises:
+            RuntimeError: If no polar data is available.
+            ValueError: If selected airfoils do not share the same dense
+                Reynolds/alpha grid.
+        """
+        if self.is_multi_airfoil:
+            labels = self._resolve_airfoil_keys(airfoil)
+            if len(labels) == 0:
+                raise RuntimeError("No airfoils selected for tensor export.")
+
+            stacked = []
+            re_axis = None
+            alpha_axis = None
+            resolved_columns = None
+
+            for label_key in labels:
+                child = self._airfoils[label_key]
+                if not child.polar:
+                    raise RuntimeError(
+                        f"No polar data for airfoil '{label_key}'."
+                    )
+
+                values, child_re, child_alpha, child_columns = child.polar.to_tensor(
+                    Re=Re,
+                    columns=columns,
+                )
+
+                if re_axis is None:
+                    re_axis = child_re
+                    alpha_axis = child_alpha
+                    resolved_columns = child_columns
+                else:
+                    if (
+                        child_re.shape != re_axis.shape
+                        or not np.allclose(child_re, re_axis, equal_nan=True)
+                    ):
+                        raise ValueError(
+                            "Cannot build multi-airfoil tensor: Reynolds grids differ."
+                        )
+                    if (
+                        child_alpha.shape != alpha_axis.shape
+                        or not np.allclose(child_alpha, alpha_axis, equal_nan=True)
+                    ):
+                        raise ValueError(
+                            "Cannot build multi-airfoil tensor: alpha grids differ."
+                        )
+                    if child_columns != resolved_columns:
+                        raise ValueError(
+                            "Cannot build multi-airfoil tensor: column sets differ."
+                        )
+
+                stacked.append(values)
+
+            return {
+                "values": np.stack(stacked, axis=0),
+                "airfoils": labels,
+                "Re": re_axis,
+                "alpha": alpha_axis,
+                "columns": resolved_columns,
+            }
+
+        if not self.polar:
+            raise RuntimeError(
+                f"No polar data for '{self.label}'. "
+                "Run get_polar() or analyze() first."
+            )
+
+        values, re_axis, alpha_axis, resolved_columns = self.polar.to_tensor(
+            Re=Re,
+            columns=columns,
+        )
+        return {
+            "values": values[None, ...],
+            "airfoils": [self.label],
+            "Re": re_axis,
+            "alpha": alpha_axis,
+            "columns": resolved_columns,
+        }

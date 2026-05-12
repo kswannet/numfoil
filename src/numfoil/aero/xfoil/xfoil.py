@@ -1,30 +1,65 @@
-from functools import cached_property
 import os
 import subprocess as sp
 import time
 
 import numpy as np
 
-from numfoil.aero.aeroresults import (
-    AeroResults,
-    PolarData,
-    CpData,
-    DumpData,
-)
+from numfoil.aero.aeroresults import AeroResults
 
 
-def _as_Re_list(reynolds):
-    """Normalise a reynolds input to a list of floats.
-
-    Args:
-        reynolds: Scalar or iterable of reynolds numbers.
-
-    Returns:
-        list: List of float reynolds values.
-    """
+def as_re_list(reynolds):
+    """Normalise a reynolds input to a list of floats."""
     if isinstance(reynolds, (int, float, np.floating)):
         return [float(reynolds)]
     return [float(r) for r in reynolds]
+
+
+def looks_like_points(value) -> bool:
+    """Return True when *value* is a single ``(N, 2)`` point array."""
+    try:
+        arr = np.asarray(value, dtype=float)
+    except (TypeError, ValueError):
+        return False
+    return arr.ndim == 2 and arr.shape[1] == 2
+
+
+def as_airfoil_batch(airfoil):
+    """Normalize airfoil input to a list of airfoil-like objects."""
+    if hasattr(airfoil, "points") or looks_like_points(airfoil):
+        return [airfoil]
+
+    if isinstance(airfoil, np.ndarray):
+        arr = np.asarray(airfoil, dtype=float)
+        if arr.ndim == 3 and arr.shape[2] == 2:
+            return [arr[i] for i in range(arr.shape[0])]
+
+    if isinstance(airfoil, (list, tuple)):
+        if len(airfoil) == 0:
+            raise ValueError("airfoil list cannot be empty")
+        if looks_like_points(airfoil):
+            return [np.asarray(airfoil, dtype=float)]
+        return list(airfoil)
+
+    return [airfoil]
+
+
+def as_label_batch(label, n_items: int):
+    """Normalize labels to one label per airfoil."""
+    if label is None:
+        return [None] * n_items
+
+    if isinstance(label, str):
+        if n_items == 1:
+            return [label]
+        return [f"{label}_{i + 1}" for i in range(n_items)]
+
+    labels = list(label)
+    if len(labels) != n_items:
+        raise ValueError(
+            "label must be a single string or have the same length as "
+            "the airfoil batch"
+        )
+    return labels
 
 
 def _get_xfoil_timeout_seconds(default: float = 120.0) -> float | None:
@@ -556,6 +591,86 @@ class XFoil:
             os.remove(filepath)
         return data
 
+    def _collect_run_outputs(
+        self,
+        result: AeroResults,
+        re_value: float,
+        paths: dict,
+        *,
+        collect_polar: bool,
+        collect_cp: bool,
+        collect_dump: bool,
+    ) -> None:
+        """Read one XFOIL session output bundle into an ``AeroResults``."""
+        if collect_polar and paths["polar"] is not None:
+            raw = self._read_output(paths["polar"], "Polar")
+            if raw:
+                result.polar._add(re_value, raw)
+
+        if collect_cp:
+            for alpha, fp in paths["cp"].items():
+                raw = self._read_output(fp, "Cp")
+                if raw:
+                    result.cp._add(alpha, re_value, raw)
+
+        if collect_dump:
+            for alpha, fp in paths["dump"].items():
+                raw = self._read_output(fp, "Dump")
+                if raw:
+                    result.dump._add(alpha, re_value, raw)
+
+    def _run_single_airfoil(
+        self,
+        *,
+        airfoil,
+        alphas,
+        reynolds,
+        Mach,
+        flap,
+        label,
+        source: str,
+        collect_polar: bool,
+        collect_cp: bool,
+        collect_dump: bool,
+    ) -> AeroResults:
+        """Run a single airfoil and collect selected output groups."""
+        auto_label, points = self._resolve_airfoil(airfoil)
+        if label is not None:
+            auto_label = label
+
+        re_list = as_re_list(reynolds)
+        alpha_list = [float(a) for a in alphas]
+        result = AeroResults(auto_label, Mach, source=source)
+
+        dat_path = os.path.join(self._XFOIL_DIR, f"_xf_{auto_label}.dat")
+        self._write_dat(points, dat_path)
+
+        try:
+            for re_value in self._progress(re_list, len(alpha_list)):
+                paths = self._run_xfoil(
+                    dat_path,
+                    alpha_list,
+                    re_value,
+                    Mach,
+                    polar=collect_polar,
+                    cp=collect_cp,
+                    dump=collect_dump,
+                    flap=flap,
+                )
+                self._collect_run_outputs(
+                    result,
+                    re_value,
+                    paths,
+                    collect_polar=collect_polar,
+                    collect_cp=collect_cp,
+                    collect_dump=collect_dump,
+                )
+        finally:
+            if os.path.isfile(dat_path):
+                os.remove(dat_path)
+
+        return result
+
     # ==========================================================
     #                       PUBLIC API
     # ==========================================================
@@ -599,38 +714,18 @@ class XFoil:
             ... )
             >>> res.polar.plot()
         """
-        auto_label, pts = self._resolve_airfoil(airfoil)
-        if label is not None:
-            auto_label = label
-
-        Re_list = _as_Re_list(reynolds)
-        alphas = [float(a) for a in alphas]
-        result = AeroResults(auto_label, Mach, source="XFoil_polar")
-
-        dat_path = os.path.join(
-            self._XFOIL_DIR,
-            f"_xf_{auto_label}.dat",
+        return self._run_single_airfoil(
+            airfoil=airfoil,
+            alphas=alphas,
+            reynolds=reynolds,
+            Mach=Mach,
+            flap=flap,
+            label=label,
+            source="XFoil_polar",
+            collect_polar=True,
+            collect_cp=False,
+            collect_dump=False,
         )
-        self._write_dat(pts, dat_path)
-
-        try:
-            for Re in self._progress(
-                Re_list, len(alphas)
-            ):
-                paths = self._run_xfoil(
-                    dat_path, alphas, Re, Mach,
-                    polar=True, flap=flap,
-                )
-                raw = self._read_output(
-                    paths["polar"], "Polar"
-                )
-                if raw:
-                    result.polar._add(Re, raw)
-        finally:
-            if os.path.isfile(dat_path):
-                os.remove(dat_path)
-
-        return result
 
     def get_cp(
         self,
@@ -663,37 +758,18 @@ class XFoil:
             >>> res = xf.get_cp(foil, [0, 5, 10], Re=1e6)
             >>> res.cp.plot(alpha=5.0)
         """
-        auto_label, pts = self._resolve_airfoil(airfoil)
-        if label is not None:
-            auto_label = label
-
-        Re_list = _as_Re_list(reynolds)
-        alphas = [float(a) for a in alphas]
-        result = AeroResults(auto_label, Mach, source="XFoil_cp")
-
-        dat_path = os.path.join(
-            self._XFOIL_DIR,
-            f"_xf_{auto_label}.dat",
+        return self._run_single_airfoil(
+            airfoil=airfoil,
+            alphas=alphas,
+            reynolds=reynolds,
+            Mach=Mach,
+            flap=flap,
+            label=label,
+            source="XFoil_cp",
+            collect_polar=False,
+            collect_cp=True,
+            collect_dump=False,
         )
-        self._write_dat(pts, dat_path)
-
-        try:
-            for Re in self._progress(
-                Re_list, len(alphas)
-            ):
-                paths = self._run_xfoil(
-                    dat_path, alphas, Re, Mach,
-                    cp=True, flap=flap,
-                )
-                for a, fp in paths["cp"].items():
-                    raw = self._read_output(fp, "Cp")
-                    if raw:
-                        result.cp._add(a, Re, raw)
-        finally:
-            if os.path.isfile(dat_path):
-                os.remove(dat_path)
-
-        return result
 
     def get_dump(
         self,
@@ -730,39 +806,45 @@ class XFoil:
             ... )
             >>> res.dump.plot(alpha=5.0)
         """
-        auto_label, pts = self._resolve_airfoil(airfoil)
-        if label is not None:
-            auto_label = label
-
-        Re_list = _as_Re_list(reynolds)
-        alphas = [float(a) for a in alphas]
-        result = AeroResults(auto_label, Mach, source="XFoil_dump")
-
-        dat_path = os.path.join(
-            self._XFOIL_DIR,
-            f"_xf_{auto_label}.dat",
+        return self._run_single_airfoil(
+            airfoil=airfoil,
+            alphas=alphas,
+            reynolds=reynolds,
+            Mach=Mach,
+            flap=flap,
+            label=label,
+            source="XFoil_dump",
+            collect_polar=False,
+            collect_cp=False,
+            collect_dump=True,
         )
-        self._write_dat(pts, dat_path)
 
-        try:
-            for Re in self._progress(
-                Re_list, len(alphas)
-            ):
-                paths = self._run_xfoil(
-                    dat_path, alphas, Re, Mach,
-                    dump=True, flap=flap,
-                )
-                for a, fp in paths["dump"].items():
-                    raw = self._read_output(
-                        fp, "Dump"
-                    )
-                    if raw:
-                        result.dump._add(a, Re, raw)
-        finally:
-            if os.path.isfile(dat_path):
-                os.remove(dat_path)
+    def _analyze_single(
+        self,
+        airfoil: np.ndarray | object,
+        alphas: np.ndarray = np.arange(-5, 15, 0.5),
+        reynolds: float | np.ndarray = 0,
+        Mach: float = 0,
+        flap: list | None = None,
+        label: str | None = None,
+    ) -> AeroResults:
+        """Analyze a single airfoil: polar + Cp + dump.
 
-        return result
+        This internal helper runs one efficient XFOIL
+        session per Reynolds number.
+        """
+        return self._run_single_airfoil(
+            airfoil=airfoil,
+            alphas=alphas,
+            reynolds=reynolds,
+            Mach=Mach,
+            flap=flap,
+            label=label,
+            source="XFoil",
+            collect_polar=True,
+            collect_cp=True,
+            collect_dump=True,
+        )
 
     def analyze(
         self,
@@ -771,7 +853,7 @@ class XFoil:
         reynolds: float | np.ndarray = 0,
         Mach: float = 0,
         flap: list | None = None,
-        label: str | None = None,
+        label: str | list[str] | tuple[str, ...] | None = None,
     ):
         """Full analysis: polar + Cp + boundary-layer dump.
 
@@ -784,21 +866,22 @@ class XFoil:
         geometry loading.
 
         Args:
-            airfoil: ``(N, 2)`` coordinate array in Selig
-                format, or an object with a ``.points``
-                property.
+            airfoil: A single airfoil input, or an iterable /
+                stacked array of multiple airfoils.
             alphas (array-like): Angles of attack in degrees.
                 Used for all three data types.
             reynolds (float or list): reynolds number(s).
             Mach (float): Freestream Mach number.
             flap (list or None):
                 ``[x_hinge, y_hinge, defl_deg]``.
-            label (str or None): Override the auto-detected
-                airfoil label.
+            label (str, sequence, or None): Label override.
+                For multi-airfoil calls, a single string is
+                expanded with ``_1``, ``_2``, etc.
 
         Returns:
-            AeroResults: Result with ``polar``, ``cp``,
-                and ``dump`` all populated.
+            AeroResults: Single-airfoil result, or a
+                multi-airfoil result container when multiple
+                airfoils are supplied.
 
         Example::
 
@@ -814,55 +897,43 @@ class XFoil:
             >>> print(res.CL_max)
             >>> print(res.CL(5.0))
         """
-        auto_label, pts = self._resolve_airfoil(airfoil)
-        if label is not None:
-            auto_label = label
+        airfoils = as_airfoil_batch(airfoil)
+        labels = as_label_batch(label, len(airfoils))
 
-        Re_list = _as_Re_list(reynolds)
-        alphas = [float(a) for a in alphas]
-        result = AeroResults(auto_label, Mach, source="XFoil")
+        if len(airfoils) == 1:
+            return self._analyze_single(
+                airfoil=airfoils[0],
+                alphas=alphas,
+                reynolds=reynolds,
+                Mach=Mach,
+                flap=flap,
+                label=labels[0],
+            )
 
-        dat_path = os.path.join(
-            self._XFOIL_DIR,
-            f"_xf_{auto_label}.dat",
+        print(f"XFOIL: multi-airfoil run ({len(airfoils)} airfoils)")
+        out = {}
+        for i, (foil, foil_label) in enumerate(
+            zip(airfoils, labels), start=1
+        ):
+            disp = foil_label if foil_label is not None else "auto"
+            print(f"[{i}/{len(airfoils)}] airfoil={disp}")
+            single = self._analyze_single(
+                airfoil=foil,
+                alphas=alphas,
+                reynolds=reynolds,
+                Mach=Mach,
+                flap=flap,
+                label=foil_label,
+            )
+            out[single.label] = single
+
+        parent_label = label if isinstance(label, str) else "multi_airfoil"
+        return AeroResults.from_airfoils(
+            out,
+            label=parent_label,
+            Mach=Mach,
+            source="XFoil",
         )
-        self._write_dat(pts, dat_path)
-
-        try:
-            for Re in self._progress(
-                Re_list, len(alphas)
-            ):
-                paths = self._run_xfoil(
-                    dat_path, alphas, Re, Mach,
-                    polar=True, cp=True, dump=True,
-                    flap=flap,
-                )
-
-                # Polar
-                raw = self._read_output(
-                    paths["polar"], "Polar"
-                )
-                if raw:
-                    result.polar._add(Re, raw)
-
-                # Cp per alpha
-                for a, fp in paths["cp"].items():
-                    raw = self._read_output(fp, "Cp")
-                    if raw:
-                        result.cp._add(a, Re, raw)
-
-                # Dump per alpha
-                for a, fp in paths["dump"].items():
-                    raw = self._read_output(
-                        fp, "Dump"
-                    )
-                    if raw:
-                        result.dump._add(a, Re, raw)
-        finally:
-            if os.path.isfile(dat_path):
-                os.remove(dat_path)
-
-        return result
 
 
 # ============================================================
@@ -934,7 +1005,7 @@ if __name__ == "__main__":
     print(f"  (L/D)_max   = {res_naca.LD_max}")
     print(f"  CD_min      = {res_naca.CD_min}")
 
-    print(f"\nA18 @ Re=1e6:")
+    print("\nA18 @ Re=1e6:")
     print(f"  CL_max      = {res_a18.CL_max:.4f}")
     print(f"  CL(5.0)     = {res_a18.CL(5.0):.4f}")
     print(f"  CD(5.0)     = {res_a18.CD(5.0):.6f}")

@@ -1,5 +1,5 @@
 # Standalone NeuralFoil solver with XFoil-compatible interface (the wrapper, not
-# actual xfoil itself).
+# actual xfoil itself), using the original Neuralfoil Numpy approach.
 #
 # This module reimplements NeuralFoil inference logic directly and returns
 # AirfoilResults/PolarData/CpData/DumpData containers for API compatibility with
@@ -36,19 +36,12 @@ from warnings import warn as warning
 
 import numpy as np
 
+from numfoil.aero.aeroresults import AeroResults
 from numfoil.data.normalization import AirfoilNormalizer
 from numfoil.geometry.airfoil import KulfanAirfoil
-from numfoil.aero.aeroresults import AeroResults
 
 _eps: float = 10 / np.finfo(np.array(1.0).dtype).max
 _ln_eps: float = np.log(_eps)
-
-
-def _as_re_list(reynolds):
-    """Normalize Reynolds input to a list of floats."""
-    if isinstance(reynolds, (int, float, np.floating)):
-        return [float(reynolds)]
-    return [float(r) for r in reynolds]
 
 
 def _to_1d_array(value) -> np.ndarray:
@@ -106,6 +99,77 @@ def _normalize_batch_size(batch_size, total_cases: int) -> int:
     return min(out, int(total_cases))
 
 
+def as_re_list(reynolds):
+    """Normalize Reynolds input to a list of floats."""
+    if isinstance(reynolds, (int, float, np.floating)):
+        return [float(reynolds)]
+    return [float(r) for r in reynolds]
+
+
+def looks_like_points(value) -> bool:
+    """Return True when *value* is a single ``(N, 2)`` point array."""
+    try:
+        arr = np.asarray(value, dtype=float)
+    except (TypeError, ValueError):
+        return False
+    return arr.ndim == 2 and arr.shape[1] == 2
+
+
+def as_airfoil_batch(airfoil):
+    """Normalize airfoil input to a list of airfoil-like objects."""
+    if hasattr(airfoil, "points") or looks_like_points(airfoil):
+        return [airfoil]
+
+    if isinstance(airfoil, np.ndarray):
+        arr = np.asarray(airfoil, dtype=float)
+        if arr.ndim == 3 and arr.shape[2] == 2:
+            return [arr[i] for i in range(arr.shape[0])]
+
+    if isinstance(airfoil, (list, tuple)):
+        if len(airfoil) == 0:
+            raise ValueError("airfoil list cannot be empty")
+        if looks_like_points(airfoil):
+            return [np.asarray(airfoil, dtype=float)]
+        return list(airfoil)
+
+    return [airfoil]
+
+
+def as_label_batch(
+    label,
+    n_items: int,
+    fallback_labels=None,
+    default_prefix: str | None = None,
+    coerce_str: bool = False,
+):
+    """Normalize labels to exactly one entry per airfoil."""
+    if label is None:
+        if fallback_labels is not None:
+            if len(fallback_labels) != n_items:
+                raise ValueError("fallback label length mismatch")
+            if coerce_str:
+                return [str(value) for value in fallback_labels]
+            return list(fallback_labels)
+        if default_prefix is not None:
+            return [f"{default_prefix}_{i + 1}" for i in range(n_items)]
+        return [None] * n_items
+
+    if isinstance(label, str):
+        if n_items == 1:
+            return [label]
+        return [f"{label}_{i + 1}" for i in range(n_items)]
+
+    labels = list(label)
+    if len(labels) != n_items:
+        raise ValueError(
+            "label must be a single string or have the same length as "
+            "the airfoil batch"
+        )
+    if coerce_str:
+        return [str(value) for value in labels]
+    return labels
+
+
 class NeuralFoil:
     """Standalone NeuralFoil inference solver.
 
@@ -130,13 +194,7 @@ class NeuralFoil:
     def __init__(
         self,
         model_size: str = "xxxlarge",
-        # parameter_file: str | Path | None = None,
     ):
-        # if parameter_file is None:
-        #     parameter_path = Path(__file__).resolve().parent / "NeuralFoilParameters.pth"
-        # else:
-        #     parameter_path = Path(parameter_file)
-
         parameter_path = Path(__file__).resolve().parent / "NeuralFoilParameters.pth"
 
         if not parameter_path.is_file():
@@ -219,31 +277,6 @@ class NeuralFoil:
         """Create Kulfan parameters from Selig points using numfoil fitting."""
         pts = np.asarray(points, dtype=float).reshape(-1, 2)
         spline = AirfoilNormalizer.normalized_bspline(pts)
-
-        # def _sanitize_surface(arr: np.ndarray) -> np.ndarray:
-        #     """this should not be needed, but enver know"""
-        #     a = np.asarray(arr, dtype=float).reshape(-1, 2)
-        #     a = a[np.isfinite(a).all(axis=1)]
-        #     a[:, 0] = np.clip(a[:, 0], 0.0, 1.0)
-        #     order = np.argsort(a[:, 0])
-        #     a = a[order]
-        #     x_unique, idx = np.unique(a[:, 0], return_index=True)
-        #     y_unique = a[idx, 1]
-        #     return np.column_stack([x_unique, y_unique])
-
-        # # Evaluate upper/lower branches and fit each side independently.
-        # u_upper = np.linspace(0.0, spline.u_leading_edge, 200)
-        # u_lower = np.linspace(spline.u_leading_edge, 1.0, 200)
-        # upper_pts = _sanitize_surface(spline.evaluate_at(u_upper)[::-1])
-        # lower_pts = _sanitize_surface(spline.evaluate_at(u_lower))
-
-        # if len(upper_pts) < n_coeff + 2 or len(lower_pts) < n_coeff + 2:
-        #     raise RuntimeError(
-        #         "Insufficient valid points after normalization for Kulfan fitting."
-        #     )
-
-        # upper_curve = CSTCurve.fit(upper_pts, num_coefficients=n_coeff, n1=0.5, n2=1.0)
-        # lower_curve = CSTCurve.fit(lower_pts, num_coefficients=n_coeff, n1=0.5, n2=1.0)
 
         airfoil = KulfanAirfoil.fit(
             spline.evaluate_at(np.linspace(0.0, spline.u_leading_edge, 200))[::-1],
@@ -345,7 +378,7 @@ class NeuralFoil:
                 "airfoil must be an object with .points, Selig point array (N,2), "
                 "or direct Kulfan vector."
             )
-        return self._build_kulfan_from_points(pts_arr, n_coeff=8)
+        return self._build_kulfan_from_points(pts_arr)
 
     def _evaluate_from_kulfan(
         self,
@@ -632,6 +665,268 @@ class NeuralFoil:
             return f"airfoil_{hash(arr.tobytes()) % 0xFFFF:04x}"
         return fallback
 
+    @staticmethod
+    def _expand_batch_param(value, n_items: int, default: float) -> np.ndarray:
+        """Expand scalar/batch optional params to length ``n_items``."""
+        if value is None:
+            return np.full(n_items, default, dtype=float)
+
+        arr = np.asarray(value, dtype=float).reshape(-1)
+        if arr.size == 1:
+            return np.full(n_items, float(arr[0]), dtype=float)
+        if arr.size != n_items:
+            raise ValueError(
+                "optional batch parameter must be scalar or match "
+                "airfoil batch length"
+            )
+        return arr
+
+    def _resolve_batch_inputs(
+        self,
+        airfoil,
+        label,
+        kulfan_parameters,
+        upper_weights,
+        lower_weights,
+        leading_edge_weight,
+        trailing_edge_thickness,
+    ) -> tuple[list[str], list[dict[str, np.ndarray]]]:
+        """Resolve one input mode into labels and per-airfoil Kulfan dicts."""
+        has_airfoil = airfoil is not None
+        has_kulfan = kulfan_parameters is not None
+        has_split = upper_weights is not None or lower_weights is not None
+
+        active = int(has_airfoil) + int(has_kulfan) + int(has_split)
+        if active != 1:
+            raise ValueError(
+                "Provide exactly one input mode: airfoil, "
+                "kulfan_parameters, or split Kulfan weights."
+            )
+
+        if has_airfoil:
+            airfoils = as_airfoil_batch(airfoil)
+            kulfan_list = [
+                self._resolve_kulfan_parameters(airfoil=item)
+                for item in airfoils
+            ]
+            fallback = [
+                self._resolve_label(item, fallback=f"airfoil_{i + 1}")
+                for i, item in enumerate(airfoils)
+            ]
+            labels = as_label_batch(
+                label,
+                len(kulfan_list),
+                fallback_labels=fallback,
+                coerce_str=True,
+            )
+            return labels, kulfan_list
+
+        if has_kulfan:
+            arr = np.asarray(kulfan_parameters, dtype=float)
+            if arr.ndim == 1:
+                kulfan_list = [self._parse_kulfan_array(arr)]
+            elif arr.ndim == 2:
+                kulfan_list = [
+                    self._parse_kulfan_array(row)
+                    for row in arr
+                ]
+            else:
+                raise ValueError(
+                    "kulfan_parameters must be shape (18,) or (B, 18)"
+                )
+
+            labels = as_label_batch(
+                label,
+                len(kulfan_list),
+                default_prefix="airfoil",
+                coerce_str=True,
+            )
+            return labels, kulfan_list
+
+        if upper_weights is None or lower_weights is None:
+            raise ValueError(
+                "Both upper_weights and lower_weights are required in split mode."
+            )
+
+        upper = np.asarray(upper_weights, dtype=float)
+        lower = np.asarray(lower_weights, dtype=float)
+        if upper.shape != lower.shape:
+            raise ValueError(
+                "upper_weights and lower_weights must have the same shape"
+            )
+
+        if upper.ndim == 1:
+            upper = upper.reshape(1, -1)
+            lower = lower.reshape(1, -1)
+        elif upper.ndim != 2:
+            raise ValueError(
+                "split Kulfan weights must be shape (8,) or (B, 8)"
+            )
+
+        if upper.shape[1] != 8:
+            raise ValueError(
+                "NeuralFoil expects exactly 8 upper and 8 lower coefficients"
+            )
+
+        n_items = upper.shape[0]
+        le_batch = self._expand_batch_param(
+            leading_edge_weight,
+            n_items,
+            default=0.0,
+        )
+        te_batch = self._expand_batch_param(
+            trailing_edge_thickness,
+            n_items,
+            default=0.0,
+        )
+
+        kulfan_list = []
+        for i in range(n_items):
+            kulfan_list.append(
+                {
+                    "upper_weights": upper[i],
+                    "lower_weights": lower[i],
+                    "leading_edge_weight": float(le_batch[i]),
+                    "TE_thickness": float(te_batch[i]),
+                }
+            )
+
+        labels = as_label_batch(
+            label,
+            n_items,
+            default_prefix="airfoil",
+            coerce_str=True,
+        )
+        return labels, kulfan_list
+
+    def _build_result_from_aero_by_re(
+        self,
+        label: str,
+        Mach: float,
+        alpha_arr: np.ndarray,
+        re_list: list[float],
+        aero_by_re: dict[float, dict[str, np.ndarray]],
+    ) -> AeroResults:
+        """Build an AeroResults object from grouped Re outputs."""
+        result = AeroResults(label, Mach, source="NeuralFoil_np_numfoil")
+
+        for re_value in re_list:
+            aero = aero_by_re[re_value]
+
+            result.polar._add(
+                re_value,
+                {
+                    "alpha": np.asarray(alpha_arr),
+                    "CL": np.asarray(aero["CL"]),
+                    "CD": np.asarray(aero["CD"]),
+                    "CM": np.asarray(aero["CM"]),
+                    "Top_Xtr": np.asarray(aero["Top_Xtr"]),
+                    "Bot_Xtr": np.asarray(aero["Bot_Xtr"]),
+                    "analysis_confidence": np.asarray(
+                        aero["analysis_confidence"]
+                    ),
+                },
+            )
+
+            for i, alpha in enumerate(alpha_arr):
+                result.dump._add(
+                    float(alpha),
+                    re_value,
+                    self._build_dump_raw(aero, i),
+                )
+
+        return result
+
+    def _evaluate_multi_airfoil(
+        self,
+        labels: list[str],
+        kulfan_list: list[dict[str, np.ndarray]],
+        alpha_arr: np.ndarray,
+        re_list: list[float],
+        n_crit: float,
+        xtr_upper: float,
+        xtr_lower: float,
+    ) -> dict[str, dict[float, dict[str, np.ndarray]]]:
+        """Evaluate all airfoils x Re x alpha in one network call."""
+        n_airfoils = len(kulfan_list)
+        n_alpha = len(alpha_arr)
+        n_re = len(re_list)
+        n_cases_per_airfoil = n_alpha * n_re
+        total_cases = n_airfoils * n_cases_per_airfoil
+
+        print(
+            "NeuralFoil: mega-batch inference "
+            f"({n_airfoils} foils x {n_re} Re x {n_alpha} alpha = "
+            f"{total_cases} cases)"
+        )
+
+        upper = np.asarray(
+            [np.asarray(k["upper_weights"], dtype=float) for k in kulfan_list]
+        )
+        lower = np.asarray(
+            [np.asarray(k["lower_weights"], dtype=float) for k in kulfan_list]
+        )
+        le = np.asarray(
+            [
+                float(np.asarray(k["leading_edge_weight"]).reshape(-1)[0])
+                for k in kulfan_list
+            ],
+            dtype=float,
+        )
+        te = np.asarray(
+            [
+                float(np.asarray(k["TE_thickness"]).reshape(-1)[0])
+                for k in kulfan_list
+            ],
+            dtype=float,
+        )
+
+        alpha_single = np.tile(alpha_arr, n_re)
+        re_single = np.repeat(np.asarray(re_list, dtype=float), n_alpha)
+
+        kulfan_batch = {
+            "upper_weights": np.repeat(
+                upper, n_cases_per_airfoil, axis=0
+            ).T,
+            "lower_weights": np.repeat(
+                lower, n_cases_per_airfoil, axis=0
+            ).T,
+            "leading_edge_weight": np.repeat(
+                le, n_cases_per_airfoil
+            ),
+            "TE_thickness": np.repeat(te, n_cases_per_airfoil),
+        }
+        alpha_flat = np.tile(alpha_single, n_airfoils)
+        re_flat = np.tile(re_single, n_airfoils)
+
+        aero_flat = self._evaluate_from_kulfan(
+            kulfan=kulfan_batch,
+            alpha=alpha_flat,
+            re_value=re_flat,
+            n_crit=n_crit,
+            xtr_upper=xtr_upper,
+            xtr_lower=xtr_lower,
+        )
+
+        by_airfoil = {}
+        for i, name in enumerate(labels):
+            start = i * n_cases_per_airfoil
+            end = (i + 1) * n_cases_per_airfoil
+
+            grids = {
+                key: np.asarray(value)[start:end].reshape(n_re, n_alpha)
+                for key, value in aero_flat.items()
+            }
+            by_re = {}
+            for j, re_value in enumerate(re_list):
+                by_re[re_value] = {
+                    key: grids[key][j].copy()
+                    for key in grids
+                }
+            by_airfoil[name] = by_re
+
+        return by_airfoil
+
     def analyze(
         self,
         airfoil=None,
@@ -655,14 +950,19 @@ class NeuralFoil:
 
         For API compatibility, :meth:`get_polar`, :meth:`get_cp`, and
         :meth:`get_dump` are thin aliases that forward to this method.
+
+        Supports single-airfoil and multi-airfoil evaluation. For
+        multi-airfoil calls, all ``airfoil x Re x alpha`` operating
+        points are flattened into one network inference call.
         """
         if Mach not in (0, 0.0):
             warning("NeuralFoil ignores Mach; argument kept for API compatibility.")
         if flap is not None:
             warning("NeuralFoil ignores flap; argument kept for API compatibility.")
 
-        kulfan = self._resolve_kulfan_parameters(
+        labels, kulfan_list = self._resolve_batch_inputs(
             airfoil=airfoil,
+            label=label,
             kulfan_parameters=kulfan_parameters,
             upper_weights=upper_weights,
             lower_weights=lower_weights,
@@ -670,48 +970,57 @@ class NeuralFoil:
             trailing_edge_thickness=trailing_edge_thickness,
         )
         alpha_arr = _to_1d_array(alphas)
-        re_list = [float(r) for r in _as_re_list(reynolds)]
+        re_list = as_re_list(reynolds)
 
-        auto_label = self._resolve_label(airfoil)
-        if label is not None:
-            auto_label = label
+        if len(kulfan_list) == 1:
+            aero_by_re = self._evaluate_by_re(
+                kulfan=kulfan_list[0],
+                alpha_arr=alpha_arr,
+                re_list=re_list,
+                n_crit=n_crit,
+                xtr_upper=xtr_upper,
+                xtr_lower=xtr_lower,
+                batch_size=batch_size,
+            )
+            return self._build_result_from_aero_by_re(
+                label=labels[0],
+                Mach=Mach,
+                alpha_arr=alpha_arr,
+                re_list=re_list,
+                aero_by_re=aero_by_re,
+            )
 
-        result = AeroResults(auto_label, Mach, source="NeuralFoil_np_numfoil")
-
-        aero_by_re = self._evaluate_by_re(
-            kulfan=kulfan,
+        by_airfoil = self._evaluate_multi_airfoil(
+            labels=labels,
+            kulfan_list=kulfan_list,
             alpha_arr=alpha_arr,
             re_list=re_list,
             n_crit=n_crit,
             xtr_upper=xtr_upper,
             xtr_lower=xtr_lower,
-            batch_size=batch_size,
         )
 
-        for re_value in re_list:
-            aero = aero_by_re[re_value]
-
-            result.polar._add(
-                re_value,
-                {
-                    "alpha": np.asarray(alpha_arr),
-                    "CL": np.asarray(aero["CL"]),
-                    "CD": np.asarray(aero["CD"]),
-                    "CM": np.asarray(aero["CM"]),
-                    "Top_Xtr": np.asarray(aero["Top_Xtr"]),
-                    "Bot_Xtr": np.asarray(aero["Bot_Xtr"]),
-                    "analysis_confidence": np.asarray(aero["analysis_confidence"]),
-                },
+        children = {
+            name: self._build_result_from_aero_by_re(
+                label=name,
+                Mach=Mach,
+                alpha_arr=alpha_arr,
+                re_list=re_list,
+                aero_by_re=by_airfoil[name],
             )
+            for name in labels
+        }
 
-            for i, alpha in enumerate(alpha_arr):
-                result.dump._add(float(alpha), re_value, self._build_dump_raw(aero, i))
-
-        return result
+        parent_label = label if isinstance(label, str) else "multi_airfoil"
+        return AeroResults.from_airfoils(
+            children,
+            label=parent_label,
+            Mach=Mach,
+            source="NeuralFoil_np_numfoil",
+        )
 
     # Aliases for compatibility with XFoil-like API.
     # All forward to the main analyze() method.
     get_polar = analyze
     get_cp = analyze
     get_dump = analyze
-
