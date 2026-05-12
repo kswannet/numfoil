@@ -1,5 +1,7 @@
 from functools import cached_property
 import os
+import re
+import shutil
 import subprocess as sp
 import time
 
@@ -10,6 +12,15 @@ from numfoil.aero.aeroresults import (
     PolarData,
     CpData,
     DumpData,
+)
+
+
+_FLOAT_RE = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][-+]?\d+)?"
+_STDOUT_ALPHA_CL_RE = re.compile(
+    rf"a\s*=\s*({_FLOAT_RE}).*?CL\s*=\s*({_FLOAT_RE})"
+)
+_STDOUT_CM_CD_RE = re.compile(
+    rf"Cm\s*=\s*({_FLOAT_RE}).*?CD\s*=\s*({_FLOAT_RE})(?:.*?CDp\s*=\s*({_FLOAT_RE}))?"
 )
 
 
@@ -188,18 +199,44 @@ class XFoil:
         Returns:
             str: Full path to the xfoil executable.
         """
+        override = os.getenv("NUMFOIL_XFOIL_EXECUTABLE", "").strip()
+        if override:
+            resolved = shutil.which(override) if os.path.basename(override) == override else override
+            if resolved and os.path.exists(resolved):
+                return str(resolved)
+            raise FileNotFoundError(
+                "NUMFOIL_XFOIL_EXECUTABLE is set but does not resolve to an existing executable: "
+                f"{override}"
+            )
+
         d = XFoil._XFOIL_DIR
-        for name in os.listdir(d):
-            if "xfoil" in name.lower() and name.endswith(
-                ".exe"
-            ):
-                return os.path.join(d, name)
+        if os.name == "nt":
+            for name in os.listdir(d):
+                if "xfoil" in name.lower() and name.endswith(
+                    ".exe"
+                ):
+                    return os.path.join(d, name)
+
+            system_xfoil = shutil.which("xfoil")
+            if system_xfoil is not None:
+                return system_xfoil
+
+            raise FileNotFoundError(
+                f"No xfoil executable found in {d} or on PATH"
+            )
+
+        system_xfoil = shutil.which("xfoil")
+        if system_xfoil is not None:
+            return system_xfoil
+
         raise FileNotFoundError(
-            f"No xfoil executable found in {d}"
+            "No xfoil executable found on PATH for this platform. "
+            "Install xfoil (for example `apt install xfoil`) or set "
+            "NUMFOIL_XFOIL_EXECUTABLE to the desired binary path."
         )
 
     @staticmethod
-    def _get_environment():
+    def _get_environment(executable: str | None = None):
         """Build an environment dict with xfoil's directory
         on PATH.
 
@@ -208,7 +245,19 @@ class XFoil:
                 dir appended.
         """
         env = os.environ.copy()
-        env["PATH"] += os.pathsep + XFoil._XFOIL_DIR
+        path_entries = env.get("PATH", "").split(os.pathsep) if env.get("PATH") else []
+
+        extra_dirs: list[str] = []
+        if os.name == "nt":
+            extra_dirs.append(XFoil._XFOIL_DIR)
+        if executable:
+            extra_dirs.append(os.path.dirname(os.path.abspath(executable)))
+
+        for extra_dir in extra_dirs:
+            if extra_dir and extra_dir not in path_entries:
+                path_entries.append(extra_dir)
+
+        env["PATH"] = os.pathsep.join(path_entries)
         return env
 
     @staticmethod
@@ -275,6 +324,78 @@ class XFoil:
             for x, y in pts:
                 f.write(f"  {x: .7f}  {y: .7f}\n")
 
+    @staticmethod
+    def _polar_point_count(raw):
+        """Return the number of polar operating points in a parsed output."""
+        if not raw:
+            return 0
+        return int(np.asarray(raw.get("alpha", [])).size)
+
+    @staticmethod
+    def _parse_polar_stdout(stdout_text):
+        """Recover converged polar points from XFOIL stdout.
+
+        Some Linux XFOIL builds compute the operating point correctly but
+        crash before flushing the accumulated polar file. In that case the
+        final converged coefficients are still present in stdout.
+        """
+        if not stdout_text:
+            return {}
+
+        points = []
+        current = None
+
+        def _flush_current():
+            nonlocal current
+            if current is None:
+                return
+            if {"alpha", "CL", "CD"}.issubset(current):
+                points.append(current)
+            current = None
+
+        for line in stdout_text.splitlines():
+            match = _STDOUT_ALPHA_CL_RE.search(line)
+            if match:
+                alpha = float(match.group(1))
+                cl = float(match.group(2))
+
+                if (
+                    current is not None
+                    and "alpha" in current
+                    and not np.isclose(
+                        alpha,
+                        current["alpha"],
+                        atol=1e-9,
+                        rtol=0.0,
+                    )
+                ):
+                    _flush_current()
+
+                if current is None:
+                    current = {}
+                current["alpha"] = alpha
+                current["CL"] = cl
+                continue
+
+            match = _STDOUT_CM_CD_RE.search(line)
+            if match and current is not None:
+                current["CM"] = float(match.group(1))
+                current["CD"] = float(match.group(2))
+                if match.group(3) is not None:
+                    current["CDp"] = float(match.group(3))
+
+        _flush_current()
+        if not points:
+            return {}
+
+        return {
+            "alpha": [point["alpha"] for point in points],
+            "CL": [point["CL"] for point in points],
+            "CD": [point["CD"] for point in points],
+            "CM": [point.get("CM", float("nan")) for point in points],
+            "CDp": [point.get("CDp", float("nan")) for point in points],
+        }
+
     def _run_xfoil(
         self,
         dat_path,
@@ -314,7 +435,7 @@ class XFoil:
             timeout_seconds = None
 
         exe = self._get_executable()
-        env = self._get_environment()
+        env = self._get_environment(executable=exe)
         debug_dir = _get_xfoil_debug_dir()
 
         dat_basename = os.path.basename(dat_path)
@@ -351,7 +472,11 @@ class XFoil:
                 os.remove(fp)
 
         # -- build command sequence --
-        cmds = [f"load {dat_basename}", ""]
+        cmds: list[str] = []
+        if os.name != "nt":
+            cmds.extend(["PLOP", "G F", ""])
+
+        cmds.extend([f"load {dat_basename}", ""])
 
         if self.NORM:
             cmds.append("NORM")
@@ -406,20 +531,25 @@ class XFoil:
             with open(f"{debug_prefix}.stdin.txt", "w", encoding="utf8", errors="replace") as f:
                 f.write(stdin_text)
 
-        startupinfo = sp.STARTUPINFO()
-        startupinfo.dwFlags |= sp.STARTF_USESHOWWINDOW
-        capture_logs = debug_prefix is not None
-        ps = sp.Popen(
-            [],
+        startupinfo = None
+        if hasattr(sp, "STARTUPINFO") and hasattr(sp, "STARTF_USESHOWWINDOW"):
+            startupinfo = sp.STARTUPINFO()
+            startupinfo.dwFlags |= sp.STARTF_USESHOWWINDOW
+        capture_logs = debug_prefix is not None or polar
+        popen_kwargs = dict(
+            args=[exe],
             executable=exe,
             stdin=sp.PIPE,
             stdout=sp.PIPE if capture_logs else sp.DEVNULL,
             stderr=sp.PIPE if capture_logs else sp.DEVNULL,
             env=env,
             cwd=self._XFOIL_DIR,
-            startupinfo=startupinfo,
             encoding="utf8",
         )
+        if startupinfo is not None:
+            popen_kwargs["startupinfo"] = startupinfo
+
+        ps = sp.Popen(**popen_kwargs)
 
         def _write_debug_outputs(status: str, stdout_text: str | None, stderr_text: str | None) -> None:
             if debug_prefix is None:
@@ -471,6 +601,9 @@ class XFoil:
             result["polar"] = os.path.join(
                 self._XFOIL_DIR, polar_bn
             )
+        result["stdout"] = stdout_text
+        result["stderr"] = stderr_text
+        result["returncode"] = ps.returncode
         for a, bn in cp_bns.items():
             result["cp"][a] = os.path.join(
                 self._XFOIL_DIR, bn
@@ -624,6 +757,66 @@ class XFoil:
                 raw = self._read_output(
                     paths["polar"], "Polar"
                 )
+                if self._polar_point_count(raw) < len(alphas):
+                    recovered = self._parse_polar_stdout(
+                        paths.get("stdout")
+                    )
+                    if self._polar_point_count(recovered) < len(alphas):
+                        recovered_points = []
+                        for alpha in alphas:
+                            single_paths = self._run_xfoil(
+                                dat_path,
+                                [alpha],
+                                Re,
+                                Mach,
+                                polar=True,
+                                flap=flap,
+                            )
+                            single_raw = self._read_output(
+                                single_paths["polar"], "Polar"
+                            )
+                            if self._polar_point_count(single_raw) == 0:
+                                single_raw = self._parse_polar_stdout(
+                                    single_paths.get("stdout")
+                                )
+                            if self._polar_point_count(single_raw) > 0:
+                                recovered_points.append(single_raw)
+
+                        if recovered_points:
+                            merged = {}
+                            keys = []
+                            for point in recovered_points:
+                                for key in point:
+                                    if key not in merged:
+                                        merged[key] = []
+                                        keys.append(key)
+
+                            for point in recovered_points:
+                                point_count = self._polar_point_count(point)
+                                if point_count == 0:
+                                    continue
+                                for key in keys:
+                                    values = point.get(key)
+                                    if values is None:
+                                        merged[key].extend(
+                                            [float("nan")] * point_count
+                                        )
+                                        continue
+                                    merged[key].extend(
+                                        np.asarray(values).tolist()
+                                    )
+
+                            if self._polar_point_count(merged) > 0:
+                                order = np.argsort(
+                                    np.asarray(merged["alpha"])
+                                )
+                                recovered = {
+                                    key: np.asarray(values)[order].tolist()
+                                    for key, values in merged.items()
+                                }
+
+                    if self._polar_point_count(recovered) > 0:
+                        raw = recovered
                 if raw:
                     result.polar._add(Re, raw)
         finally:
