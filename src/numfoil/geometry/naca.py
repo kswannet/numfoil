@@ -59,6 +59,53 @@ def parse_naca5_code(naca_code: str) -> Tuple[float, float, float, bool]:
     return cl_design, p, t, reflex
 
 
+def naca4_points(naca_code: str, te_closed: bool = False) -> np.ndarray:
+    """Returns standard surface points array for a NACA 4-series airfoil defined
+    by ``naca_code`` in Selig format.
+    Args:
+        naca_code: A string like "NACA2412" or "2412".
+        te_closed: Whether the trailing edge is closed.
+    Returns:
+        np.ndarray: Airfoil surface points, shape (199, 2), ordered from trailing edge
+            along upper surface to leading edge and back along lower surface to
+            trailing edge.
+    """
+    m, p, t = parse_naca4_code(naca_code)
+
+    x = cosine_spacing(0.0, 1.0, num=100)
+    fwd = x <= p
+    aft = ~fwd
+
+    camber_vals = np.zeros((x.size, 2))
+    camber_vals[:, 0] = x
+    camber_tangents = np.zeros((x.size, 2))
+    camber_tangents[:, 0] = 1.0
+
+    if m > 0.0:
+        camber_vals[fwd, 1] = (m / p**2) * (2.0 * p * x[fwd] - x[fwd] ** 2)
+        camber_vals[aft, 1] = (m / (1.0 - p) ** 2) * (
+            (1.0 - 2.0 * p) + 2.0 * p * x[aft] - x[aft] ** 2
+        )
+        camber_tangents[fwd, 1] = (2.0 * m / p**2) * (p - x[fwd])
+        camber_tangents[aft, 1] = (2.0 * m / (1.0 - p) ** 2) * (p - x[aft])
+
+    semi_thickness_vals = (t / 0.2) * (
+        0.2969 * np.sqrt(x)
+        - 0.1260 * x
+        - 0.3516 * (x ** 2)
+        + 0.2843 * (x ** 3)
+        - (0.1036 if te_closed else 0.1015) * (x ** 4)
+    )
+
+    camber_normals = rotate_2d_90ccw(normalize_2d(camber_tangents))
+
+    return np.vstack([
+        (camber_vals + camber_normals * semi_thickness_vals.reshape(-1, 1))[::-1],
+        (camber_vals - camber_normals * semi_thickness_vals.reshape(-1, 1))[1:]
+    ]).view(Point2D)
+
+
+
 class AnalyticYCurve(Curve):
     """
     Single-valued analytic curve y(x), exposed in the same shape conventions

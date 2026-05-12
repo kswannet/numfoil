@@ -160,6 +160,7 @@ class TorchKulfanAirfoil(nn.Module):
                 leading_edge_weight=w_le,
                 trailing_edge_thickness=t_te,
                 surface_type="upper",
+                validate_surface_type=False,
                 n1=n1,
                 n2=n2,
                 device=device,
@@ -169,6 +170,7 @@ class TorchKulfanAirfoil(nn.Module):
                 leading_edge_weight=w_le,
                 trailing_edge_thickness=t_te,
                 surface_type="lower",
+                validate_surface_type=False,
                 n1=n1,
                 n2=n2,
                 device=device,
@@ -186,6 +188,7 @@ class TorchKulfanAirfoil(nn.Module):
         n1: float = 0.5,
         n2: float = 1.0,
         device: Optional[torch.device | str] = None,
+        name: Optional[str | list[str]] = None,
         ) -> "TorchKulfanAirfoil":
         t_te = abs(t_te)  # ensure non-negative TE thickness
         # return cls(
@@ -201,6 +204,7 @@ class TorchKulfanAirfoil(nn.Module):
                 leading_edge_weight=w_le,
                 trailing_edge_thickness=t_te,
                 surface_type="upper",
+                validate_surface_type=False,
                 n1=n1,
                 n2=n2,
                 device=device,
@@ -210,10 +214,12 @@ class TorchKulfanAirfoil(nn.Module):
                 leading_edge_weight=w_le,
                 trailing_edge_thickness=t_te,
                 surface_type="lower",
+                validate_surface_type=False,
                 n1=n1,
                 n2=n2,
                 device=device,
             ),
+            name=name,
         )
 
     @property
@@ -231,6 +237,15 @@ class TorchKulfanAirfoil(nn.Module):
         ], dim=-1).squeeze()
 
     params = parameters
+
+    @property
+    def wiggliness(self) -> torch.Tensor:
+        """Get wiggliness (x^n1 * (1-x)^n2) evaluated at 200 points.
+
+        Returns:
+            torch.Tensor, shape [200]
+        """
+        return self.upper_surface.wiggliness + self.lower_surface.wiggliness
 
     @property
     def batch_size(self) -> int:
@@ -442,8 +457,8 @@ class TorchKulfanAirfoil(nn.Module):
         """
         x_te = torch.tensor([0.99], device=self.device)
 
-        dy_upper = self.upper.first_derivative(x_te, mode="analytic").squeeze(-1)
-        dy_lower = self.lower.first_derivative(x_te, mode="analytic").squeeze(-1)
+        dy_upper = self.upper_surface.first_derivative_at(x_te, mode="analytic").squeeze(-1)
+        dy_lower = self.lower_surface.first_derivative_at(x_te, mode="analytic").squeeze(-1)
 
         # Angle between surfaces
         angle_rad = torch.atan(dy_upper) - torch.atan(dy_lower)
@@ -470,8 +485,8 @@ class TorchKulfanAirfoil(nn.Module):
         """
         x_te = torch.tensor([1.0 - 1e-8], device=self.device)
 
-        dy_upper = self.upper.first_derivative(x_te, mode="analytic").squeeze(-1)
-        dy_lower = self.lower.first_derivative(x_te, mode="analytic").squeeze(-1)
+        dy_upper = self.upper_surface.first_derivative_at(x_te, mode="analytic").squeeze(-1)
+        dy_lower = self.lower_surface.first_derivative_at(x_te, mode="analytic").squeeze(-1)
 
         # Angle between surfaces
         angle_rad = torch.atan(dy_upper) - torch.atan(dy_lower)
@@ -593,8 +608,10 @@ class TorchKulfanAirfoil(nn.Module):
         self,
         idx: int = 0,
         title: Optional[str] = None,
+        color: Optional[str] = None,
         num_points: int = 2000,
         save_dir: Optional[str] = None,
+        fig=None, ax=None,
     ) -> "plt.Figure":
         """Plot airfoil using matplotlib.
 
@@ -621,11 +638,13 @@ class TorchKulfanAirfoil(nn.Module):
 
         figsize = (10, 6) #if not self.is_batched else (10, 4)
 
-        fig, ax = plt.subplots(figsize=figsize)
-        ax.plot(x, y_upper[idx], 'b-', label='Upper Kulfan Surface')
-        ax.plot(x, y_lower[idx], 'r-', label='Lower Kulfan Surface')
+        if fig is None or ax is None:
+            fig, ax = plt.subplots(figsize=figsize)
+        ax.plot(x, y_upper[idx], color or 'b-', label='Upper Kulfan Surface')
+        ax.plot(x, y_lower[idx], color or 'r-', label='Lower Kulfan Surface')
+        ax.fill_between(x, y_lower[idx], y_upper[idx], color=color or 'lightgray', alpha=0.2 if color is not None else 1)
         ax.axis('equal')
-        ax.set_title(title or 'Kulfan Airfoil')
+        ax.set_title(title or self.name or 'Kulfan Airfoil')
         ax.set_xlabel('x/c')
         ax.set_ylabel('y/c')
         ax.axis('equal')

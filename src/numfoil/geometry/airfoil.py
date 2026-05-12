@@ -88,10 +88,12 @@ class AirfoilBase(ABC):
         points = self.upper_surface.evaluate_at(
             cosine_spacing(0, 1, num=200)
         )
-        if not np.all(np.diff(points) > 0):
+        if not np.all(np.diff(points[:, 0]) > 0):
             warning(
-                "Upper surface x-coordinates are not strictly increasing. "
-                "Interpolator may be inaccurate."
+                "Upper surface x-coordinates are not strictly increasing, "
+                "interpolator may be inaccurate. "
+                "This is likely due to surface splines exceeding range x=[0,1], "
+                "Use normalize Bspline airfoil to avoid this."
             )
         # filter out all points with non-increasing x-coordinates
         # this prevents a lot of headaches
@@ -116,7 +118,7 @@ class AirfoilBase(ABC):
         points = self.lower_surface.evaluate_at(
             cosine_spacing(0, 1, num=200)
         )
-        if not np.all(np.diff(points) > 0):
+        if not np.all(np.diff(points[:, 0]) > 0):
             warning(
                 "Upper surface x-coordinates are not strictly increasing. "
                 "Interpolator may be inaccurate."
@@ -346,13 +348,13 @@ class AirfoilBase(ABC):
             np.column_stack([x, self.lower_surface_at(x)])[1:],
         ]).view(Point2D)
 
-    def plot(self, n_points=1000, show=False, **pltkwargs):
+    def plot(self, n_points=1000, show=True, **pltkwargs):
         """Plots the airfoil geometry."""
         x = cosine_spacing(0, 1, num=n_points)
         fig, ax = plt.subplots()
-        ax.plot(x, self.upper_surface_at(x), label="Upper Surface", **pltkwargs)
-        ax.plot(x, self.lower_surface_at(x), label="Lower Surface", **pltkwargs)
-        ax.plot(x, self.camber_at(x), label="Camber Line", **pltkwargs)
+        ax.plot(*self.upper_surface.evaluate_at(x).T, label="Upper Surface", **pltkwargs)
+        ax.plot(*self.lower_surface.evaluate_at(x).T, label="Lower Surface", **pltkwargs)
+        ax.plot(*self.camber_line.evaluate_at(x).T, label="Camber Line", **pltkwargs)
         ax.set_title(
             self.description.replace("#", "")
             or self.name
@@ -404,6 +406,7 @@ class AirfoilBase(ABC):
     @property
     def trailing_edge_gap(self):
         return self.trailing_edge_thickness
+
 
 
 class BsplineAirfoil(AirfoilBase):
@@ -2505,6 +2508,8 @@ class NACA4Airfoil(AirfoilBase):
 
         self.te_closed = te_closed
 
+        self.description = f"NACA 4-series airfoil with max camber {self.max_camber*100:.1f}% at {self.camber_location*100:.1f}% chord and max thickness {self.max_thickness*100:.1f}%."
+
     @property
     def cambered(self) -> bool:
         """Returns if the current :py:class:`Airfoil` is cambered."""
@@ -2716,6 +2721,16 @@ class NACA4Airfoil(AirfoilBase):
         """Returns the thickness distribution curve of the airfoil as Bspline."""
         return BSpline2D(
             self.naca_thickness_distribution.evaluate_at(cosine_spacing(0, 1, num=200))
+        )
+
+    def to_bspline_airfoil(self) -> BsplineAirfoil:
+        """Converts the NACA4Airfoil to a BsplineAirfoil by fitting a spline to the airfoil points."""
+        x = cosine_spacing(0, 1, num=200)
+        return BsplineAirfoil.from_coordinate_array(
+            np.vstack([
+                (self.camber_line.evaluate_at(x) + self.offset_vectors_at(x))[::-1],
+                (self.camber_line.evaluate_at(x) - self.offset_vectors_at(x))[1:]
+            ])
         )
 
 
