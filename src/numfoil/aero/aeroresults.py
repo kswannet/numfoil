@@ -438,6 +438,9 @@ class PolarData:
             out[r] = float(a[np.nanargmax(LD)])
         return self._scalar_or_dict(out)
 
+    CL_des = CL_opt
+    alpha_des = alpha_opt
+
     @property
     def CD_min(self):
         """Minimum drag coefficient.
@@ -520,14 +523,18 @@ class PolarData:
             >>> res.polar.summary()
         """
         Re_list = self.reynolds
+        alpha_st = "\u03b1_st"
+        alpha_l0 = "\u03b1_L0"
+        alpha_opt = "\u03b1_opt"
+        dcl_dalpha = "dCL/d\u03b1"
 
         header = (
             f"{'Airfoil':<16} {'Re':>10}  "
-            f"{'CL_max':>7} {'\u03b1_st':>5} "
-            f"{'CL0':>7} {'\u03b1_L0':>6} "
+            f"{'CL_max':>7} {alpha_st:>5} "
+            f"{'CL0':>7} {alpha_l0:>6} "
             f"{'L/D_mx':>7} {'CL_opt':>7} "
-            f"{'\u03b1_opt':>5} "
-            f"{'CD_min':>9} {'dCL/d\u03b1':>7}"
+            f"{alpha_opt:>5} "
+            f"{'CD_min':>9} {dcl_dalpha:>7}"
         )
         sep = "=" * len(header)
         lines = [sep, header, sep]
