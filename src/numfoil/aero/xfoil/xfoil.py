@@ -778,7 +778,7 @@ class XFoil:
         if label is not None:
             auto_label = label
 
-        re_list = as_re_list(reynolds)
+        re_list = _as_Re_list(reynolds)
         alpha_list = [float(a) for a in alphas]
         result = AeroResults(auto_label, Mach, source=source)
 
