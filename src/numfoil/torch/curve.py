@@ -132,6 +132,27 @@ class TorchCSTCurve(nn.Module):
         return self.coefficients.shape[0]
 
     @property
+    def is_batched(self) -> bool:
+        return self.batch_size > 1
+
+    def __getitem__(self, idx: int) -> "TorchCSTCurve":
+        """Get a curve from the batch.
+
+        Args:
+            idx (int): Index of the curve to retrieve.
+        Returns:
+            TorchCSTCurve: A new instance containing only the selected curve.
+        """
+        if not self.is_batched:
+            raise IndexError("Cannot index into a non-batched curve. Batch size is 1, meaning only a single curve is available.")
+        return TorchCSTCurve(
+            coefficients=self.coefficients[idx],
+            n1=self.n1,
+            n2=self.n2,
+            device=self.device,
+        )
+
+    @property
     def n_coefficients(self) -> int:
         """Number of coefficients in the shape function"""
         return self.coefficients.shape[-1]
@@ -1029,6 +1050,8 @@ class KulfanModifiedCST(TorchCSTCurve):
             else self.infer_surface_type()
         )
 
+        trailing_edge_thickness = torch.as_tensor(trailing_edge_thickness)
+
         # little validation
         if self.surface_type not in ("upper", "lower"):
             raise ValueError("surface_type must be 'upper' or 'lower'.")
@@ -1066,6 +1089,23 @@ class KulfanModifiedCST(TorchCSTCurve):
             self._prepare_modifier_parameter(
                 torch.abs(trailing_edge_thickness)  # trailing edge thickness always non-negative
             ),
+        )
+
+    def __getitem__(self, idx: int) -> "KulfanModifiedCST":
+        """Get a curve from the batch.
+
+        Args:
+            idx (int): Index of the curve to retrieve.
+        Returns:
+            KulfanModifiedCST: A new instance containing only the selected curve.
+        """
+        if not self.is_batched:
+            raise IndexError("Cannot index into a non-batched curve. Batch size is 1.")
+        return KulfanModifiedCST(
+            coefficients=self.coefficients[idx],
+            n1=self.n1,
+            n2=self.n2,
+            device=self.device,
         )
 
     # def _validate(self):
