@@ -93,6 +93,25 @@ class TorchKulfanAirfoil(nn.Module):
         #         f" Problematic airfoil indices: {torch.argwhere(self.thickness_at(torch.linspace(0, 1, 200))[...,:].amin(dim=-1)<0).squeeze()}"
         #     )
 
+
+    def __getitem__(self, idx: int) -> "TorchKulfanAirfoil":
+        """Get a single airfoil from the batch.
+        Should make indexing possible.
+
+        Args:
+            idx (int): Index of the airfoil to retrieve.
+        Returns:
+            TorchKulfanAirfoil: A new instance containing only the selected airfoil.
+        """
+        if not self.is_batched:
+            raise IndexError("Cannot index into a non-batched airfoil. Batch size is 1.")
+        return TorchKulfanAirfoil(
+            upper_surface=self.upper_surface[idx],
+            lower_surface=self.lower_surface[idx],
+            name=self.name[idx] if self.name is not None else None,
+            device=self.device,
+        )
+
     @classmethod
     def from_tensor(
         cls,
@@ -176,6 +195,7 @@ class TorchKulfanAirfoil(nn.Module):
                 device=device,
             ),
             name=name,
+            device=device,
         )
 
     @classmethod
