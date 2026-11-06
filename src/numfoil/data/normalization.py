@@ -9,8 +9,9 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1.inset_locator import zoomed_inset_axes, mark_inset
 
-from ..geometry.spline import BSpline2D, SplevCBezier
+from ..geometry.spline import BSpline2D
 from ..geometry.geom2d import Point2D, Geom2D
+from .repair import remove_consecutive_duplicates, fill_data_gaps
 
 
 class AirfoilNormalizer:
@@ -47,8 +48,8 @@ class AirfoilNormalizer:
         # breakpoint() # ! reconsider... please...
         if points.ndim != 2 or points.shape[-1] != 2:
             raise ValueError("Input points must be a 2D array with shape (N, 2).")
-        points = cls.fill_data_gaps(points)
-        spline = cls.fix_trailing_edge(BSpline2D(points))
+        points_temp = fill_data_gaps(points)
+        spline = cls.fix_trailing_edge(BSpline2D(points_temp))
         leading_edge, trailing_edge, _ = cls.find_leading_trailing_edges(spline)
         scale, translation, rotation = cls.compute_normalization_transformation(leading_edge, trailing_edge)
         return cls.apply_transformation(points, scale, translation, rotation).T
@@ -72,8 +73,8 @@ class AirfoilNormalizer:
                 raise ValueError(
                     "Input points must be a 2D array with shape (N, 2)"
                 )
-            points = cls.remove_consecutive_duplicates(data)
-            points = cls.fill_data_gaps(points)
+            points = remove_consecutive_duplicates(data)
+            points = fill_data_gaps(points)
             data = BSpline2D(points)
 
         if not isinstance(data, BSpline2D):
@@ -146,96 +147,11 @@ class AirfoilNormalizer:
             (scale, translation, rotation)
         )
 
-    @staticmethod
-    def remove_consecutive_duplicates(points: np.ndarray) -> np.ndarray:
-        """Removes consecutive duplicate points from the array."""
-        # # this one checks for exact duplicates
-        # diff = np.diff(points, axis=0)
-        # idx = np.where(np.any(diff != 0, axis=1))[0] + 1
-        # # this one checks for duplicates in x, regardless of y
-        # x_diff = np.diff(points[:, 0])
-        # idx = np.where(x_diff != 0)[0] + 1
-        # return np.vstack([points[0], points[idx]])
-        # # new version that should also fix manually closed trailing edges
-        x, y = points[:, 0], points[:, 1]
-        mask = np.ones(len(points), dtype=bool)
-        for i in np.where(np.isclose(np.diff(x), 0))[0]:
-            mask[i + (abs(y[i + 1]) > abs(y[i]))] = False
-        return points[mask]
 
     @staticmethod
     def remove_overshoots(points: np.ndarray) -> np.ndarray:
         """Removes points that are outside the range x=[0, 1]."""
         return points[(points[:, 0] >= 0) & (points[:, 0] <= 1)]
-
-    @classmethod
-    def fill_data_gaps(cls, points: np.ndarray, gap_threshold: float = 0.15) -> np.ndarray:
-        """Detect and fill large gaps in airfoil coordinate data with
-        interpolated points.
-
-        This method identifies gaps in x-coordinate data that are larger than the
-        threshold and inserts a single interpolated point at the midpoint of each gap.
-        This is useful for airfoils like b707b.dat that have missing data sections.
-
-        Args:
-            points: Airfoil coordinate array with shape [N, 2]
-            gap_threshold: Minimum gap size in x-coordinate to trigger filling (default: 0.15)
-
-        Returns:
-            np.ndarray: Points with gaps filled by interpolated midpoints
-        """
-        if len(points) < 4:
-            return points
-
-        # The number of points to insert and interpolation points now depend on gap size
-        # // just some settings to mess with. currently not accessible from outside
-        # // n_fill = 3 # number of points to insert per gap
-        # // n_interp = 3 # number of points to use for interpolation on each side of the gap
-
-        # Calculate gaps between consecutive x-coordinates
-        x_diffs = np.abs(np.diff(points[:, 0]))
-        gap_indices = np.where(x_diffs > gap_threshold)[0]
-
-        if len(gap_indices) == 0:
-            return points  # No gaps to fill
-
-        # Work backwards through gaps to avoid index shifting when inserting
-        filled_points = points.copy()
-        for gap_idx in reversed(gap_indices):
-            # number of infill points depends on the gap size
-            gap_size = x_diffs[gap_idx]
-
-            # add in one point per ~0.11 gap size
-            n_fill = int(gap_size // 0.11)
-
-            # use at least 3 points on either side for interpolation, but add more for larger gaps
-            n_interp = max(3, int(gap_size // 0.11))
-
-            # Points on either side of the gap
-            pt1 = filled_points[gap_idx]
-            pt2 = filled_points[gap_idx + 1]
-            filler_x = np.linspace(pt1[0], pt2[0], num=n_fill + 2)[1:-1]  # 3 points in between
-
-            flank_pts = filled_points[
-                min(gap_idx, max(0, gap_idx - n_interp + 1)) : min(len(filled_points), gap_idx + n_interp)
-            ]  # n_interp points on either side of the gap
-            if np.all(np.diff(flank_pts[:, 0])<0):
-                flank_pts = flank_pts[::-1]
-
-            # Create interpolated midpoint
-            # mid_x = 0.5 * (pt1[0] + pt2[0])
-            # mid_y = 0.5 * (pt1[1] + pt2[1])  # Linear interpolation for y
-            # mid_y = float(f_interp(mid_x))  # Use interpolator for y-coordinate
-            # midpoint = np.array([mid_x, mid_y])
-
-            # Insert midpoint after the first point of the gap
-            # filled_points = np.insert(filled_points, gap_idx + 1, midpoint,
-            # axis=0)
-
-            filler_y = si.pchip_interpolate(flank_pts[:, 0], flank_pts[:, 1], filler_x)
-            filler_points = np.column_stack((filler_x, filler_y))
-            filled_points = np.insert(filled_points, gap_idx + 1, filler_points, axis=0)
-        return filled_points
 
     @classmethod
     def _get_key_locations(cls, spline: BSpline2D) -> Tuple[Point2D, Point2D]:
@@ -627,6 +543,10 @@ class AirfoilNormalizer:
         #     assert spline_start.x == x_trailing_edge, \
         #         "Failed to overwrite start point"
 
+        # If the spline already ends at the target trailing edge x-coordinate,
+        # AND if the first control point is also at that same target (forming
+        # nice loop), OR the spline starts in the origin (one side of the
+        # airfoil), then the spline is assumed to be already complete.
         if spline_end.x == x_trailing_edge:                                 # last point already at target
             if spline_start.x == x_trailing_edge or spline_start.x == 0.0:  # first point also at target
                 # no adjustments needed
@@ -637,7 +557,7 @@ class AirfoilNormalizer:
         # at the maximum x-value found, while the other side is missing data.
         # if abs(spline_start.x - spline_end.x) > 1e-6:
 
-        adjusted_control_points = spline.control_points.copy()
+        adjusted_control_points = spline.control_points.copy()  # avoid modifying the original control points in place
         # check if first control point needs adjustment
         if spline_start.x != x_trailing_edge and spline_start.x != 0.0:
             # move the first control point along direction from point 1 to point
@@ -679,7 +599,7 @@ class AirfoilNormalizer:
             adjusted_control_points[-1][1] = - 0.5 * gap
             #! if any control points exceed x=1 after adjustment, set them to 1
             #! this is a really dirty fix, only as last resort
-            adjusted_control_points[adjusted_control_points.x > 1.0, 0] = 0.9995
+            adjusted_control_points[adjusted_control_points.x > 1.0, 0] = 0.9995  # not exactly 1 to avoid a problem, but I forgot what problem
 
         spline.control_points = adjusted_control_points
 
@@ -724,7 +644,7 @@ class AirfoilNormalizer:
         def objective(u):
             return -np.linalg.norm(trailing_edge - spline.evaluate_at(u))
 
-        res = opt.minimize(objective, 0.5, bounds=[(0, 1)], method="SLSQP")
+        res = opt.minimize(objective, 0.5, bounds=[(0, 1)], method="SLSQP")  # slsqp because it simply proved most robust
         if not res.success:
             raise RuntimeError("Failed to find leading edge. \n" + str(res))
         return spline.evaluate_at(res.x[0]), res.x[0]

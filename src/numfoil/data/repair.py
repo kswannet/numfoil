@@ -93,8 +93,9 @@ def repair_negative_thickness_points(
     if not np.allclose(x_upper, x_lower, atol=1e-8, rtol=1e-6):
         raise ValueError("upper_points and lower_points must share x-coordinates.")
 
-    lead_shape = x_upper.shape[:-1]
-    n_points = x_upper.shape[-1]
+    # get the leading dimensions and number of points for vectorized operations
+    lead_shape = x_upper.shape[:-1]  # [..., N, 2], ... = leading dimensions
+    n_points = x_upper.shape[-1]     # [..., N, 2], N = number of points
     n_samples = int(np.prod(lead_shape)) if lead_shape else 1
 
     # Flatten any leading dimensions to one sample axis for vectorized math.
@@ -432,25 +433,49 @@ def fix_swapped_points(points: np.array) -> bool:
     return np.vstack([upper_fixed[::-1], lower_fixed[1:]]).view(Point2D)
 
 
-def remove_consecutive_duplicates(points: np.ndarray) -> np.ndarray:
-    """As used in AirfoilNormalizer.
-    Removes consecutive duplicate points from the array.
-    """
-    x, y = points[:, 0], points[:, 1]
-    mask = np.ones(len(points), dtype=bool)
-    for i in np.where(np.isclose(np.diff(x), 0))[0]:
-        mask[i + (abs(y[i + 1]) > abs(y[i]))] = False
-    return points[mask]
+def remove_consecutive_duplicates(
+    points: Point2D | np.ndarray,
+    keep: str = "outer",
+    metric: str = "y",
+) -> np.ndarray:
+    """Remove consecutive points with approximately equal x-coordinates.
 
+    NOTE: The highest (abs) y-value is kept by default to fix the case where
+        points were manually added at (1,0) to close the TE.
 
-def remove_consecutive_duplicates(points: np.ndarray) -> np.ndarray:
-    """As used in AirfoilNormalizer.
-    Removes consecutive duplicate points from the array.
+    Args:
+        points (Point2D | np.ndarray): Array of 2D points.
+        keep (str): Which duplicate to retain.
+            Options:
+                - "inner": Keep the point with the smaller y-value (closer to the chord line).
+                - "outer": Keep the point with the larger y-value (further from the chord line).
+                Default is "outer".
+        metric (str): Distance metric used to determine inner/outer: "y" or "norm".
+            Options:
+                - "y": Use the y-coordinate (default).
+                - "norm": Use the Euclidean norm of the point (sqrt(x^2 + y^2)).
+                Default is "y".
+
+    Returns:
+        np.ndarray: Array with consecutive duplicate points removed.
     """
-    x, y = points[:, 0], points[:, 1]
+    if keep not in {"inner", "outer"}:
+        raise ValueError(f"Invalid 'keep': {keep!r}. Expected 'inner' or 'outer'.")
+
+    match metric:
+        case "y":
+            values = np.abs(points[:, 1])
+        case "norm":
+            values = np.linalg.norm(points, axis=1)
+        case _:
+            raise ValueError(f"Invalid 'metric': {metric!r}. Expected 'y' or 'norm'.")
+
+    idx = np.where(np.isclose(np.diff(points[:, 0]), 0))[0]  # duplicate locations ([idx] == [idx + 1])
+    remove_next = values[idx + 1] > values[idx]  # True if the next point is "outer" (larger value) than the current point
+
     mask = np.ones(len(points), dtype=bool)
-    for i in np.where(np.isclose(np.diff(x), 0))[0]:
-        mask[i + (abs(y[i + 1]) > abs(y[i]))] = False
+    mask[idx + (remove_next if keep == "inner" else ~remove_next)] = False
+
     return points[mask]
 
 
@@ -472,8 +497,10 @@ def fill_data_gaps(points: np.ndarray, gap_threshold: float = 0.15) -> np.ndarra
     This is useful for airfoils like b707b.dat that have missing data sections.
 
     Args:
-        points: Airfoil coordinate array with shape [N, 2]
-        gap_threshold: Minimum gap size in x-coordinate to trigger filling (default: 0.15)
+        points (np.ndarray):
+            Airfoil coordinate array with shape [N, 2]
+        gap_threshold (float):
+            Minimum gap size in x-coordinate to trigger filling (default: 0.15)
 
     Returns:
         np.ndarray: Points with gaps filled by interpolated midpoints

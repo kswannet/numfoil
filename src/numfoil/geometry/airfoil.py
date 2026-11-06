@@ -120,7 +120,7 @@ class AirfoilBase(ABC):
         )
         if not np.all(np.diff(points[:, 0]) > 0):
             warning(
-                "Upper surface x-coordinates are not strictly increasing. "
+                "Lower surface x-coordinates are not strictly increasing. "
                 "Interpolator may be inaccurate."
             )
         x, y = points[points[:, 0] == np.maximum.accumulate(points[:, 0])].T
@@ -552,14 +552,14 @@ class BsplineAirfoil(AirfoilBase):
 
         # Bsplines are parametric, so interpolation is needed to ensure x-coordinates align
         x_vals = cosine_spacing(0, 1, num=200)
-        camber_points = np.columnstack([
+        camber_points = np.column_stack([
             x_vals,
             si.PchipInterpolator(
                 *camber_curve.evaluate_at(x_vals).T,
                 extrapolate=True
             )(x_vals)
         ])
-        half_thickness_points = np.columnstack([
+        half_thickness_points = np.column_stack([
             x_vals,
             si.PchipInterpolator(
                 *thickness_curve.evaluate_at(x_vals).T,
