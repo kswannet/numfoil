@@ -1,3 +1,57 @@
 [tool.black]
 line-length = 79
 target_version = ['py38']
+
+[build-system]
+requires = ["setuptools>=80", "setuptools-scm[simple]>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+version = "0.1.0"  # Remove any existing version parameter.
+# dynamic = ["version"]
+
+name = "numfoil"
+dependencies = [
+  "matplotlib",
+  "numpy",
+  "scipy",
+  "Deprecated",
+  "numba",
+]
+requires-python = ">=3.8"
+authors = [
+  {name = "Kilian Swannet", email = "K.Swannet@student.tudelft.nl"},
+  {name = "San Kilkis", email = "Kilkis@student.tudelft.nl"},
+]
+maintainers = [
+  {name = "Kilian Swannet", email = "K.Swannet@student.tudelft.nl"}
+]
+description = "A Thin Airfoil Theory Solver" 
+readme = {file = "README.md", content-type = "text/markdown"}
+license= "Apache-2.0"
+license-files = ["LICEN[CS]E.*"]
+keywords = ["aerodynamics", "aircraft"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Education",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.8",
+    "Topic :: Education"
+]
+
+[project.optional-dependencies]
+dev = [
+  "colorama",
+  "flake8",
+  "flake8-black",
+  "flake8-docstrings",
+  "flake8-isort",
+  "pytest",
+  "pytest-cov",
+  "pyyaml",
+]
+xfoil = ["xfoil @ git+https://github.com/skilkis/xfoil_wrapper.git"]
+
+[project.urls]
+Repository = "https://github.com/kswannet/numfoil"
+"Bug Tracker" = "https://github.com/kswannet/numfoil/issues"
